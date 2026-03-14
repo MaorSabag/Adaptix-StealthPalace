@@ -43,19 +43,6 @@ typedef struct {
 	DWORD  picSize;
 } PIC_CLEANUP_CTX;
 
-typedef struct {
-    void (*fn)();
-    HANDLE event;
-} APC_CALLBACK_CTX;
-
-typedef struct _PICO {
-	char data [ 4096 ];
-	char code [ 16384 ];
-} PICO;
-
-
-typedef void (WINAPI* _GetVersions)();
-
 int __tag_setup_hooks ( );
 int __tag_set_image_info ( );
 
