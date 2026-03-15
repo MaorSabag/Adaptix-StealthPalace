@@ -98,7 +98,7 @@ Follow these steps to build and integrate the StealthPalace extender:
 git clone https://github.com/MaorSabag/Adaptix-StealthPalace.git
 cd Adaptix-StealthPalace 
 ```
-2. **Configure Root Path:** Open `pl_main.go` and set the `root` variable to reflect the full absolute path of your local repository.
+2. **Configure Root Path:** Open `pl_agent.go` and set the `root` variable to reflect the full absolute path of your local repository.
 3. **Build the Go Service:**
 ```bash
 cd src_service
@@ -114,6 +114,10 @@ Add the path to the StealthPalace configuration file into your profile.yaml unde
 ```yaml
   extenders:
     - "Adaptix-StealthPalace/src_service/dist/config.yaml"
+```
+5. **Mark Crystal Palace's link file as executable:**
+```bash
+chmod +x /path/to/Adaptix-StealthPalace/crystal_palace/link
 ```
 ---
 
