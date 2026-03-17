@@ -138,6 +138,7 @@ func compileCoff(op, root string, p Params) error {
 	cflags := []string{
 		"-DWIN_X64", "-shared", "-Wall", "-Wno-pointer-arith",
 		"-mno-stack-arg-probe", "-fno-zero-initialized-in-bss",
+		"-fasynchronous-unwind-tables", "-mabi=ms", "-foptimize-sibling-calls",
 	}
 
 	// ─── STOMP DLL Support ───────────────────────────────
@@ -153,6 +154,20 @@ func compileCoff(op, root string, p Params) error {
 
 	if p.Debug {
 		cflags = append(cflags, "-DDEBUG", "-g")
+	}
+
+	// ─── Sleep Obfuscation ───────────────────────────────
+
+	if p.SleepObf {
+		switch strings.ToLower(p.SleepObfTechnique) {
+		case "ekko":
+			cflags = append(cflags, "-DSLEEP_OBF_EKKO")
+			logInfo(op, "Sleep obfuscation: Ekko enabled")
+		default:
+			logInfo(op, "Sleep obfuscation: unknown technique %q, skipping", p.SleepObfTechnique)
+		}
+	} else {
+		logInfo(op, "Sleep obfuscation: disabled")
 	}
 
 	sources := []struct {

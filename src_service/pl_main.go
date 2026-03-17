@@ -42,7 +42,7 @@ type Teamserver interface {
 var (
 	Ts        	Teamserver
 	ModuleDir 	string
-	Settings   	SaveSettings
+	Settings   	= defaultSaveSettings()
 )
 
 // ─── Service Type ─────────────────────────────────────────────────────────────
@@ -78,26 +78,32 @@ type EventDataAgentGenerate struct {
 // ─── Request Shapes ───────────────────────────────────────────────────────────
 
 type Params struct {
-	DLL      string `json:"dll"`
-	Format   string `json:"format"`
-	Out      string `json:"out"`
-	Pic      string `json:"pic"`
-	Debug    bool   `json:"debug"`
-	SkipCoff bool   `json:"skip_coff"`
-	SkipLink bool   `json:"skip_link"`
-	StompDLL string `json:"stomp_dll"`
-	HostDLL  string `json:"host_dll"`
+	DLL               string `json:"dll"`
+	Format            string `json:"format"`
+	Out               string `json:"out"`
+	Pic               string `json:"pic"`
+	WrapDLL           bool   `json:"wrap_dll"`
+	Debug             bool   `json:"debug"`
+	SkipCoff          bool   `json:"skip_coff"`
+	SkipLink          bool   `json:"skip_link"`
+	StompDLL          string `json:"stomp_dll"`
+	HostDLL           string `json:"host_dll"`
+	SleepObf          bool   `json:"sleep_obf"`
+	SleepObfTechnique string `json:"sleep_obf_technique"`
 }
 
 type SaveSettings struct {
-	Format   string `json:"format"`
-	Out      string `json:"out"`
-	Pic      string `json:"pic"`
-	Debug    bool   `json:"debug"`
-	SkipCoff bool   `json:"skip_coff"`
-	SkipLink bool   `json:"skip_link"`
-	StompDLL string `json:"stomp_dll"`
-	HostDLL  string `json:"host_dll"`
+	Format            string `json:"format"`
+	Out               string `json:"out"`
+	Pic               string `json:"pic"`
+	WrapDLL           bool   `json:"wrap_dll"`
+	Debug             bool   `json:"debug"`
+	SkipCoff          bool   `json:"skip_coff"`
+	SkipLink          bool   `json:"skip_link"`
+	StompDLL          string `json:"stomp_dll"`
+	HostDLL           string `json:"host_dll"`
+	SleepObf          bool   `json:"sleep_obf"`
+	SleepObfTechnique string `json:"sleep_obf_technique"`
 }
 
 
@@ -148,7 +154,7 @@ func InitPlugin(ts any, moduleDir string, serviceConfig string) adaptix.PluginSe
 	fmt.Println("[stealthpalace] InitPlugin → service registered and ready")
 	loadSettings, err := Ts.TsExtenderDataLoad("stealthpalace", "settings")
 	if err == nil {
-		var s SaveSettings
+		s := defaultSaveSettings()
 		if err := json.Unmarshal(loadSettings, &s); err == nil {
 			Settings = s
 			fmt.Printf("[stealthpalace] Loaded saved settings: %+v\n", Settings)
@@ -243,12 +249,18 @@ func handleCompile(operator string, args string) {
 }
 
 func handleSaveSettings(operator string, args string) {
-	
-	if err := json.Unmarshal([]byte(args), &Settings); err != nil {
+	s := defaultSaveSettings()
+	if err := json.Unmarshal([]byte(args), &s); err != nil {
 		sendError(operator, "save_settings_log", fmt.Sprintf("invalid args: %v", err))
 		return
 	}
-	if err := Ts.TsExtenderDataSave("stealthpalace", "settings", []byte(args)); err != nil {
+	Settings = s
+	saveData, err := json.Marshal(Settings)
+	if err != nil {
+		sendError(operator, "save_settings_log", fmt.Sprintf("failed to serialize settings: %v", err))
+		return
+	}
+	if err := Ts.TsExtenderDataSave("stealthpalace", "settings", saveData); err != nil {
 		sendError(operator, "save_settings_log", fmt.Sprintf("failed to save settings: %v", err))
 		return
 	}
@@ -300,7 +312,22 @@ func stealthPalaceWrapper(event any) error {
 		return nil
 	}
 
-	builderId := s.FieldByName("BuilderId").String()
+	if !Settings.WrapDLL {
+		fmt.Printf("[stealthpalace] DLL wrapping disabled; skipping %s\n", fNameField.String())
+		return nil
+	}
+
+	builderIdField := s.FieldByName("BuilderId")
+	if !builderIdField.IsValid() {
+		return errors.New("field 'BuilderId' not found in event")
+	}
+	if builderIdField.Kind() != reflect.String {
+		return errors.New("field 'BuilderId' is not a string")
+	}
+	builderId := builderIdField.String()
+	if builderId == "" {
+		return errors.New("field 'BuilderId' is empty")
+	}
 
 	originalBytes := fContentField.Bytes()
 	b64Content := base64.StdEncoding.EncodeToString(originalBytes)
@@ -318,14 +345,16 @@ func stealthPalaceWrapper(event any) error {
 	}
 
 	p.DLL = string(dllContentBytes)
-	p.Format = strings.ToLower(Settings.Format)
-	p.Out = Settings.Out
-	p.Pic = Settings.Pic
-	p.Debug = Settings.Debug
-	p.SkipCoff = Settings.SkipCoff
-	p.SkipLink = Settings.SkipLink
-	p.HostDLL = Settings.HostDLL
-	p.StompDLL = Settings.StompDLL
+	p.Format            = strings.ToLower(Settings.Format)
+	p.Out               = Settings.Out
+	p.Pic               = Settings.Pic
+	p.Debug             = Settings.Debug
+	p.SkipCoff          = Settings.SkipCoff
+	p.SkipLink          = Settings.SkipLink
+	p.HostDLL           = Settings.HostDLL
+	p.StompDLL          = Settings.StompDLL
+	p.SleepObf          = Settings.SleepObf
+	p.SleepObfTechnique = Settings.SleepObfTechnique
 
 	newFileContent := Compile("", builderId, p)
 
@@ -355,5 +384,16 @@ func isValidFormat(f string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func defaultSaveSettings() SaveSettings {
+	return SaveSettings{
+		Format:            "exe",
+		Out:               "agent",
+		Pic:               "agent.bin",
+		WrapDLL:           true,
+		SleepObf:          false,
+		SleepObfTechnique: "ekko",
 	}
 }

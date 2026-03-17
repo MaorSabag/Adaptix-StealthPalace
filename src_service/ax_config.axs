@@ -5,7 +5,9 @@ var metadata = {
 };
 
 var g_output_widget = null;
-var g_settings = {};
+var g_settings = {
+    wrap_dll: true
+};
 
 function InitService() {
     ax.log("StealthPalace service loaded.");
@@ -21,7 +23,17 @@ function InitService() {
 function handleLoad(response) {
     if (response.success) {
         try {
-            g_settings = JSON.parse(response.output || "{}");
+            let loadedSettings = JSON.parse(response.output || "{}");
+            if (typeof loadedSettings.wrap_dll === "undefined") {
+                loadedSettings.wrap_dll = true;
+            }
+            if (typeof loadedSettings.sleep_obf === "undefined") {
+                loadedSettings.sleep_obf = false;
+            }
+            if (typeof loadedSettings.sleep_obf_technique === "undefined") {
+                loadedSettings.sleep_obf_technique = "ekko";
+            }
+            g_settings = loadedSettings;
             ax.log("StealthPalace settings synchronized.");
         } catch(e) {
             ax.log("Error parsing settings: " + e);
@@ -105,14 +117,16 @@ function buildCompileWindow() {
     grp_build.setPanel(panel_build);
 
     // Group 3: Flags
+    let chk_wrap_dll  = form.create_check("Enable DLL wrapping hook");
     let chk_debug     = form.create_check("Debug (-mconsole)");
     let chk_skip_coff = form.create_check("Skip COFF (reuse .o)");
     let chk_skip_link = form.create_check("Skip Link (reuse agent.bin)");
 
     let grid_flags = form.create_gridlayout();
-    grid_flags.addWidget(chk_debug, 0, 0, 1, 1);
-    grid_flags.addWidget(chk_skip_coff, 1, 0, 1, 1);
-    grid_flags.addWidget(chk_skip_link, 2, 0, 1, 1);
+    grid_flags.addWidget(chk_wrap_dll, 0, 0, 1, 1);
+    grid_flags.addWidget(chk_debug, 1, 0, 1, 1);
+    grid_flags.addWidget(chk_skip_coff, 2, 0, 1, 1);
+    grid_flags.addWidget(chk_skip_link, 3, 0, 1, 1);
     let grp_flags = form.create_groupbox("Compiler Flags", false);
     let panel_flags = form.create_panel();
     panel_flags.setLayout(grid_flags);
@@ -131,7 +145,19 @@ function buildCompileWindow() {
     let grp_stomp = form.create_groupbox("Stomp Options (optional)", true);
     grp_stomp.setPanel(panel_stomp);
 
-    // Group 5: Output
+    // Group 5: Sleep Obfuscation
+    let comboSleepObf = form.create_combo();
+    let sleepObfItems = ["Ekko"];
+    comboSleepObf.addItems(sleepObfItems);
+    let grid_sleep = form.create_gridlayout();
+    grid_sleep.addWidget(form.create_label("Technique:"), 0, 0, 1, 1);
+    grid_sleep.addWidget(comboSleepObf, 0, 1, 1, 1);
+    let panel_sleep = form.create_panel();
+    panel_sleep.setLayout(grid_sleep);
+    let grp_sleep = form.create_groupbox("Sleep Obfuscation (optional)", true);
+    grp_sleep.setPanel(panel_sleep);
+
+    // Group 6: Output
     let txt_output = form.create_textmulti();
     txt_output.setReadOnly(true);
     g_output_widget = txt_output;
@@ -147,6 +173,7 @@ function buildCompileWindow() {
         if (idx !== -1) comboFormat.setCurrentIndex(idx);
     }
     if (g_settings.out) txt_out.setText(g_settings.out);
+    chk_wrap_dll.setChecked(g_settings.wrap_dll !== false);
     if (g_settings.debug) chk_debug.setChecked(true);
     if (g_settings.skip_coff) chk_skip_coff.setChecked(true);
     if (g_settings.skip_link) chk_skip_link.setChecked(true);
@@ -161,11 +188,25 @@ function buildCompileWindow() {
         panel_stomp.setEnabled(false);
     }
 
+    if (g_settings.sleep_obf) {
+        grp_sleep.setChecked(true);
+        panel_sleep.setEnabled(true);
+        let sleepIdx = sleepObfItems.findIndex(i => i.toLowerCase() === (g_settings.sleep_obf_technique || "ekko").toLowerCase());
+        if (sleepIdx !== -1) comboSleepObf.setCurrentIndex(sleepIdx);
+    } else {
+        grp_sleep.setChecked(false);
+        panel_sleep.setEnabled(false);
+    }
+
     let btn_save = form.create_button("Save Settings");
     let btn_compile = form.create_button("▶ Compile");
 
     form.connect(grp_stomp, "clicked", function (checked) {
         panel_stomp.setEnabled(checked);
+    });
+
+    form.connect(grp_sleep, "clicked", function (checked) {
+        panel_sleep.setEnabled(checked);
     });
 
     form.connect(comboFormat, "currentTextChanged", function (text) {
@@ -193,11 +234,14 @@ function buildCompileWindow() {
             format: comboFormat.currentText(),
             out: txt_out.text(),
             pic: txt_out.text() + ".bin",
+            wrap_dll: chk_wrap_dll.isChecked(),
             debug: chk_debug.isChecked(),
             skip_coff: chk_skip_coff.isChecked(),
             skip_link: chk_skip_link.isChecked(),
-            host_dll: textlineHostDll.text(),
-            stomp_dll: textlineStompDll.text()
+            host_dll: grp_stomp.isChecked() ? textlineHostDll.text() : "",
+            stomp_dll: grp_stomp.isChecked() ? textlineStompDll.text() : "",
+            sleep_obf: grp_sleep.isChecked(),
+            sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko"
         };
         // Send to service for persistent storage
         ax.service_command("stealthpalace", "save_settings", g_settings);
@@ -237,7 +281,9 @@ function buildCompileWindow() {
             skip_coff: chk_skip_coff.isChecked(),
             skip_link: chk_skip_link.isChecked(),
             host_dll: grp_stomp.isChecked() ? textlineHostDll.text() : "",
-            stomp_dll: grp_stomp.isChecked() ? textlineStompDll.text() : ""
+            stomp_dll: grp_stomp.isChecked() ? textlineStompDll.text() : "",
+            sleep_obf: grp_sleep.isChecked(),
+            sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko"
         });
     });
 
@@ -246,6 +292,7 @@ function buildCompileWindow() {
     main_layout.addWidget(grp_build);
     main_layout.addWidget(grp_flags);
     main_layout.addWidget(grp_stomp);
+    main_layout.addWidget(grp_sleep);
     main_layout.addWidget(btn_save);
     main_layout.addWidget(btn_compile);
     main_layout.addWidget(grp_output);
