@@ -477,7 +477,7 @@ DWORD _WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) {
     return _WaitForSingleObjectEx(hHandle, dwMilliseconds, FALSE);    
 }
 
-
+__attribute__((optimize("O2"), noinline))
 DWORD _WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitAll, DWORD dwMilliseconds) {
     StealthDbg("WaitForMultipleObjects called - simulating wait\n");
     
@@ -505,6 +505,7 @@ DWORD _WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitA
     }
 }
 
+__attribute__((optimize("O2"), noinline))
 BOOL _ConnectNamedPipe(HANDLE hPipe, LPOVERLAPPED lpOverlapped) {
     StealthDbg("ConnectNamedPipe called - simulating connection\n");
     
