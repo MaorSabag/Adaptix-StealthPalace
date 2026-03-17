@@ -1,6 +1,6 @@
 CC_64=x86_64-w64-mingw32-gcc
 NASM=nasm
-CFLAGS=-DWIN_X64 -shared -Wall -Wno-pointer-arith -mno-stack-arg-probe -fno-zero-initialized-in-bss
+CFLAGS=-DWIN_X64 -shared -Wall -Wno-pointer-arith -mno-stack-arg-probe -fno-zero-initialized-in-bss -fasynchronous-unwind-tables -mabi=ms -foptimize-sibling-calls
 
 all: build/loader.x64.o build/hooks.x64.o build/pico.x64.o build/services.x64.o build/stomp.x64.o
 
