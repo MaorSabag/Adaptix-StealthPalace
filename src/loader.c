@@ -62,6 +62,7 @@ void fix_section_permissions(DLLDATA *dll, char *base_addr) {
     }
 }
 
+
 void go(void)
 {
     IMPORTFUNCS funcs;
@@ -73,6 +74,10 @@ void go(void)
     PICO* pico_dst = NULL;
 #if MODE_STOMP
     PICO_ARGS picoArgs;
+    RUNTIME_FUNCTION* pico_rf = (RUNTIME_FUNCTION*)KERNEL32$VirtualAlloc(NULL, MAX_PICO_FUNCS * sizeof(RUNTIME_FUNCTION), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    int pico_rf_count = 0;
+    picoArgs.pico_rf_storage = pico_rf;
+    picoArgs.pico_rf_count   = &pico_rf_count;
     picoArgs.funcs = &funcs;
     picoArgs.pico_src = pico_src;
     picoArgs.pico_dst = &pico_dst;
@@ -157,17 +162,39 @@ void go(void)
     StealthDbg ( "fixing section permissions...\n" );
     fix_section_permissions(&dll_data, dll_dst);
 
+    /* Register .pdata */
+    IMAGE_DATA_DIRECTORY* pExcept = &dll_data.OptionalHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (pExcept->VirtualAddress && pExcept->Size) {
+        RUNTIME_FUNCTION* pFuncTable = (RUNTIME_FUNCTION*)(dll_dst + pExcept->VirtualAddress);
+        DWORD funcCount = pExcept->Size / sizeof(RUNTIME_FUNCTION);
+        for (DWORD i = 0; i < min(funcCount, 5); i++) {
+            StealthDbg(".pdata[%d]: Begin=%08X End=%08X UnwindInfo=%08X\n",
+                i,
+                pFuncTable[i].BeginAddress,
+                pFuncTable[i].EndAddress,
+                pFuncTable[i].UnwindData
+            );
+
+        }
+
+        if (!KERNEL32$RtlAddFunctionTable(pFuncTable, funcCount, (DWORD_PTR)dll_dst)) {
+            StealthDbg("RtlAddFunctionTable failed\n");
+        } else {
+            StealthDbg("Registered %lu exception handlers\n", funcCount);
+        }
+    } else {
+        StealthDbg("No .pdata section, skipping\n");
+    }
+
     /* protect the PE header page as read-only */
     DWORD hdr_old_protect = 0;
     KERNEL32$VirtualProtect ( dll_dst, dll_data.NtHeaders->OptionalHeader.SizeOfHeaders, PAGE_READONLY, &hdr_old_protect );
 	KERNEL32$FlushInstructionCache((HANDLE)-1, dll_dst, SizeOfDLL(&dll_data));
 
-    StealthDbg ( "calling entry point...\n" );
+    StealthDbg("calling entry point...\n");
+
     DLLMAIN_FUNC entry_point = EntryPoint(&dll_data, dll_dst);
-    entry_point((HINSTANCE)dll_dst, DLL_PROCESS_ATTACH, NULL);
-    
-    KERNEL32$FlushInstructionCache((HANDLE)-1, dll_dst, SizeOfDLL(&dll_data));
+    StealthDbg("entry_point=%p  dll_dst=%p  AOE=0x%X\n", (void*)entry_point, dll_dst, (unsigned)dll_data.NtHeaders->OptionalHeader.AddressOfEntryPoint);
 
-    entry_point((HINSTANCE)(char*)go, 0x4, NULL);
-
+    entry_point((HINSTANCE)dll_dst, DLL_PROCESS_ATTACH, NULL);    
 }
