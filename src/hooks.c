@@ -442,7 +442,6 @@ VOID EkkoObf(HOOK_TYPE Hook, HOOK_ARGS *Args)
 #endif /* SLEEP_OBF_EKKO */
 
 #ifdef SLEEP_OBF_EKKO
-__attribute__((optimize("O2"), noinline))
 static DWORD _WaitForSingleObjectEx_Obf(HANDLE hHandle, DWORD dwMilliseconds, BOOL bAlertable) {
     WAIT_FOR_SINGLE_OBJECT_EX_ARGS WaitArgs = { hHandle, dwMilliseconds, bAlertable, g_pWaitForSingleObjectEx };
     HOOK_ARGS Args = { .WaitForSingleObjectExArgs = WaitArgs };

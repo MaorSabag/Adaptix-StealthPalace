@@ -88,6 +88,7 @@ type Params struct {
 	SkipLink          bool   `json:"skip_link"`
 	StompDLL          string `json:"stomp_dll"`
 	HostDLL           string `json:"host_dll"`
+	StompDllTechnique string `json:"stomp_dll_technique"`
 	SleepObf          bool   `json:"sleep_obf"`
 	SleepObfTechnique string `json:"sleep_obf_technique"`
 }
@@ -102,6 +103,7 @@ type SaveSettings struct {
 	SkipLink          bool   `json:"skip_link"`
 	StompDLL          string `json:"stomp_dll"`
 	HostDLL           string `json:"host_dll"`
+	StompDllTechnique string `json:"stomp_dll_technique"`
 	SleepObf          bool   `json:"sleep_obf"`
 	SleepObfTechnique string `json:"sleep_obf_technique"`
 }
@@ -232,8 +234,7 @@ func handleCompile(operator string, args string) {
 		return
 	}
 
-	fmt.Printf("[stealthpalace] compile → format=%s out=%s debug=%v skip_coff=%v skip_link=%v host_dll=%s stomp_dll=%s\n",
-		p.Format, p.Out, p.Debug, p.SkipCoff, p.SkipLink, p.HostDLL, p.StompDLL)
+	fmt.Printf("[stealthpalace] compile → format=%s out=%s debug=%v skip_coff=%v skip_link=%v host_dll=%s stomp_dll=%s stomp_technique=%s\n", p.Format, p.Out, p.Debug, p.SkipCoff, p.SkipLink, p.HostDLL, p.StompDLL, p.StompDllTechnique)
 
 	fmt.Printf("[stealthpalace] DLL payload length: %d bytes\n", len(p.DLL))
 
@@ -353,6 +354,7 @@ func stealthPalaceWrapper(event any) error {
 	p.SkipLink          = Settings.SkipLink
 	p.HostDLL           = Settings.HostDLL
 	p.StompDLL          = Settings.StompDLL
+	p.StompDllTechnique = Settings.StompDllTechnique
 	p.SleepObf          = Settings.SleepObf
 	p.SleepObfTechnique = Settings.SleepObfTechnique
 
@@ -395,5 +397,6 @@ func defaultSaveSettings() SaveSettings {
 		WrapDLL:           true,
 		SleepObf:          false,
 		SleepObfTechnique: "ekko",
+		StompDllTechnique: "loadlibraryex",
 	}
 }

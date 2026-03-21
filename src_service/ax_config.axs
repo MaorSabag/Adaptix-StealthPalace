@@ -33,6 +33,9 @@ function handleLoad(response) {
             if (typeof loadedSettings.sleep_obf_technique === "undefined") {
                 loadedSettings.sleep_obf_technique = "ekko";
             }
+            if (typeof loadedSettings.stomp_dll_technique === "undefined") {
+                loadedSettings.stomp_dll_technique = "loadlibraryex";
+            }
             g_settings = loadedSettings;
             ax.log("StealthPalace settings synchronized.");
         } catch(e) {
@@ -135,11 +138,17 @@ function buildCompileWindow() {
     // Group 4: Stomp
     let textlineHostDll = form.create_textline();
     let textlineStompDll = form.create_textline();
+    let comboStompTechnique = form.create_combo();
+    let stompTechItems = ["LoadLibraryEx", "NtCreateSection + NtMapViewOfSection"];
+    comboStompTechnique.addItems(stompTechItems);
+    comboStompTechnique.setCurrentIndex(0);
     let grid_stomp = form.create_gridlayout();
     grid_stomp.addWidget(form.create_label("Host DLL:"), 0, 0, 1, 1);
     grid_stomp.addWidget(textlineHostDll, 0, 1, 1, 1);
     grid_stomp.addWidget(form.create_label("Stomp DLL:"), 1, 0, 1, 1);
     grid_stomp.addWidget(textlineStompDll, 1, 1, 1, 1);
+    grid_stomp.addWidget(form.create_label("Technique:"), 2, 0, 1, 1);
+    grid_stomp.addWidget(comboStompTechnique, 2, 1, 1, 1);
     let panel_stomp = form.create_panel();
     panel_stomp.setLayout(grid_stomp);
     let grp_stomp = form.create_groupbox("Stomp Options (optional)", true);
@@ -183,6 +192,8 @@ function buildCompileWindow() {
         panel_stomp.setEnabled(true);
         textlineHostDll.setText(g_settings.host_dll || "");
         textlineStompDll.setText(g_settings.stomp_dll || "");
+        let techIdx = stompTechItems.findIndex(i => i.toLowerCase() === (g_settings.stomp_dll_technique || "loadlibraryex").toLowerCase());
+        if (techIdx !== -1) comboStompTechnique.setCurrentIndex(techIdx);
     } else {
         grp_stomp.setChecked(false);
         panel_stomp.setEnabled(false);
@@ -240,6 +251,7 @@ function buildCompileWindow() {
             skip_link: chk_skip_link.isChecked(),
             host_dll: grp_stomp.isChecked() ? textlineHostDll.text() : "",
             stomp_dll: grp_stomp.isChecked() ? textlineStompDll.text() : "",
+            stomp_dll_technique: grp_stomp.isChecked() ? comboStompTechnique.currentText().toLowerCase() : "loadlibraryex",
             sleep_obf: grp_sleep.isChecked(),
             sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko"
         };
@@ -282,6 +294,7 @@ function buildCompileWindow() {
             skip_link: chk_skip_link.isChecked(),
             host_dll: grp_stomp.isChecked() ? textlineHostDll.text() : "",
             stomp_dll: grp_stomp.isChecked() ? textlineStompDll.text() : "",
+            stomp_dll_technique: grp_stomp.isChecked() ? comboStompTechnique.currentText().toLowerCase() : "loadlibraryex",
             sleep_obf: grp_sleep.isChecked(),
             sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko"
         });

@@ -191,10 +191,10 @@ void go(void)
     KERNEL32$VirtualProtect ( dll_dst, dll_data.NtHeaders->OptionalHeader.SizeOfHeaders, PAGE_READONLY, &hdr_old_protect );
 	KERNEL32$FlushInstructionCache((HANDLE)-1, dll_dst, SizeOfDLL(&dll_data));
 
-    StealthDbg ( "calling entry point...\n" );
-    DLLMAIN_FUNC entry_point = EntryPoint(&dll_data, dll_dst);
+    StealthDbg("calling entry point...\n");
 
-    KERNEL32$FlushInstructionCache((HANDLE)-1, dll_dst, SizeOfDLL(&dll_data));
+    DLLMAIN_FUNC entry_point = EntryPoint(&dll_data, dll_dst);
+    StealthDbg("entry_point=%p  dll_dst=%p  AOE=0x%X\n", (void*)entry_point, dll_dst, (unsigned)dll_data.NtHeaders->OptionalHeader.AddressOfEntryPoint);
 
     entry_point((HINSTANCE)dll_dst, DLL_PROCESS_ATTACH, NULL);    
 }
