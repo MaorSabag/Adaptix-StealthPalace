@@ -1,31 +1,111 @@
-# Crystal Palace RDLL Template for Adaptix C2
+# StealthPalace
 
-A Crystal Palace-based reflective loader pipeline for Adaptix agents, with runtime API hook support, sleep obfuscation, resource masking, and section-aware memory protection restoration.
+> **Reflective DLL Loader & Sleep Obfuscation Engine for [Adaptix C2](https://github.com/Adaptix-Framework/AdaptixC2)**
 
-## Purpose
+StealthPalace is a production-grade RDLL loader built on [Crystal Palace](https://www.cobaltstrike.com/product/crystal-palace) that keeps the Adaptix agent dark between callbacks. It combines IAT-level hooking, RC4-based Ekko sleep obfuscation, overlapped I/O for the SMB beacon, and per-section memory permission restoration — all compiled into a position-independent PIC blob that cleans itself up after execution.
 
-This repository contains the loader side of the integration:
+---
 
-1. Build Adaptix agent wrappers (`exe`, `dll`, `svc`) from a generated PIC blob.
-2. Hook selected APIs through IAT-compatible call paths.
-3. Obfuscate in-memory image during sleep cycles.
-4. Restore section permissions after wake-up for safer execution.
-5. Keep payloads masked in the embedded resources until runtime.
+## Core Capabilities
 
-This repository does not contain the full Adaptix source tree. Adaptix-side compatibility patches are tracked in a separate fork/branch.
+| Capability | Details |
+|---|---|
+| **XOR Resource Masking** | Payload encrypted at link time with a random 128-byte key via Crystal Palace directives. Decrypted at runtime into a temporary `VirtualAlloc` buffer, mapped, then securely wiped. |
+| **Ekko Sleep Obfuscation** | Full image RC4-encrypted in memory during sleep via a 6-step `NtContinue` ROP chain (timer queue callbacks). Triggered on `Sleep`, `ConnectNamedPipe`, `FlushFileBuffers`, and `WaitForSingleObjectEx`. |
+| **IAT Hooking via PICO** | PICO intercepts `GetProcAddress` at load time to redirect target APIs through the hook table, enabling transparent sleep obfuscation without modifying agent source flow. |
+| **Per-Section Permission Restore** | After decryption, a PE section walker applies correct page protections (`.text` → `RX`, `.data` → `RW`, etc.) instead of blanket `RWX`. Required for BOF compatibility and cleaner memory forensics. |
+| **Overlapped I/O SMB Beacon** | Named pipe opened with `FILE_FLAG_OVERLAPPED`. `WaitForSingleObjectEx(INFINITE, TRUE)` acts as the unified sleep hook point, eliminating `PeekNamedPipe` polling. |
+| **PIC Self-Cleanup** | After `go()` returns, the loader's own RX allocation is wiped and freed — no artifacts left on the heap. |
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     StealthPalace PIC Blob                  │
+│                                                             │
+│  ┌──────────┐    ┌──────────┐    ┌──────────────────────┐   │
+│  │ loader.c │───▶│  pico.c  │───▶│  Adaptix Agent DLL   │   │
+│  │          │    │          │    │  (mapped in memory)  │   │
+│  │ XOR-dec  │    │ hook IAT │    │                      │   │
+│  │ map DLL  │    │ GetProc  │    │  Sleep()─────────────┼───┼──▶ hooks.c
+│  │ fix perms│    │ Address  │    │  ConnectNamedPipe()──┼───┼──▶ EkkoObf()
+│  └──────────┘    └──────────┘    │  WaitForSingleObj()──┼───┼──▶ RC4 enc/dec
+│                                  └──────────────────────┘   │  + perm restore
+│  ┌──────────────┐                                           │
+│  │ services.c   │  API resolution via ROR13 hash walking    │
+│  └──────────────┘                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Sleep Obfuscation — ROP Chain Detail
+
+When any hooked sleep function is called, `EkkoObf()` queues 6 timer callbacks that execute sequentially via `NtContinue`, implementing the Ekko technique:
+
+```
+1. NtContinue → RtlCaptureContext      (save current CONTEXT)
+2. NtContinue → SetEvent               (signal start)
+3. NtContinue → SystemFunction032      (RC4-encrypt image in-place)
+4. NtContinue → WaitForSingleObjectEx  (actual sleep — alertable wait)
+5. NtContinue → SystemFunction032      (RC4-decrypt image)
+6. NtContinue → restore_section_perms  (re-apply RX/RW/RO per section)
+```
+
+The RC4 key is derived from a stack-allocated context, not stored statically. The image is opaque to EDR memory scanners during the wait window.
+
+---
 
 ## Project Layout
 
 ```text
-install.sh                 # Automated install: build, patch, register extender
-Makefile                   # COFF build and utility targets
-src/                       # Core PIC loader/hook logic
-loader/                    # EXE/DLL/SVC wrappers and includes
-src_service/               # Adaptix builder extender plugin integration
-crystal_palace/            # Crystal Palace linker/spec toolchain assets
-bin/                       # Build artifacts
-demo/                      # Optional demo assets
+src/
+  loader.c          # Main PIC: XOR-unmasks DLL, loads PICO, maps DLL, fixes permissions, calls entry
+  hooks.c           # IAT hooks → EkkoObf() + restore_section_permissions()
+  pico.c            # PICO: hooked GetProcAddress, setup_hooks(), set_image_info()
+  services.c        # API resolution via ROR13 hash walking
+  loader.h          # PE export lookup helper
+  stomp.c / stomp.h # Module stomping support
+  tcg.h             # Crystal Palace intrinsics & DLL loader structs
+
+crystal_palace/
+  specs/
+    loader.spec     # Main PIC build spec (XOR masking, key generation)
+    pico.spec       # PICO build spec (merges hooks.c, registers Sleep hook)
+    services.spec   # Services build spec (API resolution via ror13/strings)
+  link              # Crystal Palace link wrapper
+  piclink           # Crystal Palace PIC link wrapper
+  coffparse         # COFF parser utility
+  disassemble       # Disassembler utility
+
+loader/
+  include/
+    Adaptix.h       # Adaptix C2 header
+    Shellcode.h     # Auto-generated PIC blob as C hex array
+  source/main/
+    Exe.cc          # Final binary wrapper (EXE format)
+    Dll.cc          # Final binary wrapper (DLL format)
+    Svc.cc          # Final binary wrapper (service format)
+  test/
+    run.c           # Test harness (loads and executes the PIC blob)
+
+src_service/        # Adaptix builder extender plugin (Go)
+install.sh          # Automated install: build, patch, register extender
+Makefile            # COFF object compilation
+bin/                # Compiled COFF objects and PIC blob (agent.bin)
 ```
+
+---
+
+## Prerequisites
+
+- Crystal Palace toolchain (included in `crystal_palace/`)
+- MinGW cross-compiler: `x86_64-w64-mingw32-gcc`
+- Go 1.25+ (for the Adaptix service extender plugin)
+- Clang: `clang++` targeting `x86_64-w64-mingw32` (final binary compilation)
+- Java 11+ (required by Crystal Palace)
+
+---
 
 ## Installation
 
@@ -38,7 +118,7 @@ chmod +x install.sh
 ./install.sh --ax /path/to/AdaptixServer
 ```
 
-`--ax` must point to the directory that contains `profile.yaml` (your Adaptix server root). The script will fail early with a clear message if the path is wrong or the profile is missing.
+`--ax` must point to the directory containing `profile.yaml` (your Adaptix server root). The script will fail early with a clear message if the path is wrong or the profile is missing.
 
 After it completes, restart your Adaptix teamserver to pick up the new extender.
 
@@ -46,50 +126,20 @@ After it completes, restart your Adaptix teamserver to pick up the new extender.
 
 ### Manual Setup
 
-If you prefer to set things up step by step, install the dependencies first.
-
-#### System Packages
-
 Install the following on your build host (Debian/Ubuntu example):
 
 ```bash
-# Java runtime (required by Crystal Palace toolchain)
-sudo apt install -y default-jre
-
-# MinGW cross-compiler (COFF compilation)
-sudo apt install -y gcc-mingw-w64-x86-64
-
-# Clang/LLVM (final wrapper compilation)
-sudo apt install -y clang lld
-
-# Go (building the Adaptix service extender plugin)
-# Requires Go 1.25+ — install from https://go.dev/dl/
-
-# Build essentials
-sudo apt install -y make
+sudo apt install -y default-jre gcc-mingw-w64-x86-64 clang lld make
+# Go 1.25+ — install from https://go.dev/dl/
 ```
 
-#### Crystal Palace Toolchain
-
-The toolchain ships in `crystal_palace/` and includes:
-
-| File | Purpose |
-|---|---|
-| `crystalpalace.jar` | Core linker/PIC builder (Java) |
-| `coffparse` | COFF object parser (bash wrapper → Java) |
-| `link` | Spec-driven linker (bash wrapper → Java) |
-| `piclink` | PIC blob builder (bash wrapper → Java) |
-| `disassemble` | Disassembler (bash wrapper → Java) |
-| `libtcg.x64.zip` | TCG support library — unzip into place |
-| `specs/` | Linker spec files (`loader.spec`, `pico.spec`, `services.spec`) |
-
-Make the shell wrappers executable:
+Make the Crystal Palace shell wrappers executable:
 
 ```bash
 chmod +x crystal_palace/coffparse crystal_palace/link crystal_palace/piclink crystal_palace/disassemble
 ```
 
-#### Build
+Build:
 
 ```bash
 # Build COFF objects
@@ -104,22 +154,22 @@ Then manually add `src_service/dist/config.yaml` to the `extenders:` list in you
 #### Quick Dependency Check
 
 ```bash
-java -version           # Java 11+
+java -version                        # Java 11+
 x86_64-w64-mingw32-gcc --version
 clang++ --version
-go version              # 1.25+
+go version                           # 1.25+
 make --version
 ```
 
+---
+
 ## Adaptix Source Compatibility
 
-The Adaptix-side changes are maintained in this branch:
+StealthPalace requires specific patches to the Adaptix agent source. The patched branch is maintained at:
 
-- https://github.com/MaorSabag/AdaptixC2/tree/Compatible-with-StealthPalace
+- **https://github.com/MaorSabag/AdaptixC2/tree/Compatible-with-StealthPalace**
 
 ### Using the pre-patched branch (recommended)
-
-The easiest approach — clone or switch to the branch that already has all changes applied:
 
 ```bash
 git clone -b Compatible-with-StealthPalace https://github.com/MaorSabag/AdaptixC2.git
@@ -132,73 +182,54 @@ git remote add stealthpalace https://github.com/MaorSabag/AdaptixC2.git
 git fetch stealthpalace
 git checkout -b stealthpalace stealthpalace/Compatible-with-StealthPalace
 ```
+---
 
-### Manual port (advanced)
+## Resource Masking — Crystal Palace Directives
 
-If you prefer to apply the changes on top of upstream `Adaptix-Framework/AdaptixC2:main`, cherry-pick these commits in order:
+The embedded DLL payload is never stored in cleartext inside the PIC blob. `loader.spec` handles masking at link time:
 
-```bash
-git remote add stealthpalace https://github.com/MaorSabag/AdaptixC2.git
-git fetch stealthpalace Compatible-with-StealthPalace
+```
+generate $KEY 128       # random 128-byte XOR key
 
-git cherry-pick 5e2af22  # SMB Connector → event-driven blocking
-git cherry-pick 4d977de  # SMB connector follow-up
-git cherry-pick c463915  # Minor fixes
-git cherry-pick 2b7c3c7  # Final result
-git cherry-pick ac0ab9e  # AdaptixServer changes
+push $DLL
+    xor $KEY            # XOR-encrypt the DLL
+    preplen             # prepend cleartext length
+    link "dll"          # embed into the "dll" section
+
+push $KEY
+    preplen             # prepend key length
+    link "mask"         # embed into the "mask" section
 ```
 
-If a cherry-pick conflicts, refer to the full commit for context:
+At runtime, `loader.c` reads both sections as length-prefixed `RESOURCE` blobs, XOR-decrypts into a temporary `VirtualAlloc` buffer, maps the PE into a correctly laid-out image, then wipes and frees the plaintext copy.
 
-| Commit | Description | Link |
-|---|---|---|
-| `5e2af22` | Restructure SMB Connector from Polling to Event-Driven Blocking | [view](https://github.com/MaorSabag/AdaptixC2/commit/5e2af220bd407e72d7349f9d726ad6a99c0bd38d) |
-| `4d977de` | SMB connector follow-up | [view](https://github.com/MaorSabag/AdaptixC2/commit/4d977dee51dc7dca9ce3ec43af42e52b94305ac1) |
-| `c463915` | Minor fixes | [view](https://github.com/MaorSabag/AdaptixC2/commit/c463915249ace510e9874d28911b33c50687855e) |
-| `2b7c3c7` | Final result | [view](https://github.com/MaorSabag/AdaptixC2/commit/2b7c3c76e5a06c7f12d00955bfe3fe7b04c6a978) |
-| `ac0ab9e` | AdaptixServer changes | [view](https://github.com/MaorSabag/AdaptixC2/commit/ac0ab9ebbdf0d8d4b9831bddd5386d20b3e1b19e) |
+---
 
-<details>
-<summary>What these commits change</summary>
+## Compiler Flags
 
-- SMB connector transition from polling to event-driven/overlapped flow.
-- Connector and agent-side API/interface alignment for response handling.
-- Follow-up fixes for connector timing and stability.
-- Consolidated compatibility edits across loader-facing agent code.
-- Adaptix server-side post-build hook changes for StealthPalace wrapping.
+| Flag | Rationale |
+|---|---|
+| `-mno-stack-arg-probe` | Avoids `___chkstk_ms` relocation. EkkoObf uses ~8.5 KB of stack — the probe would fault inside the ROP chain. |
+| `-fno-zero-initialized-in-bss` | Forces zero-initialized globals into `.data`. PIC blobs cannot resolve `.bss` relocations. |
 
-**Adaptix files typically touched:**
-
-- `AdaptixServer/teamserver/evt/evt_types.go`
-- `AdaptixServer/teamserver/extender/ts_agent_builder.go`
-- `AdaptixServer/template/implant/src/core/ApiLoader.cpp`
-- `AdaptixServer/template/implant/src/core/ApiLoader.h`
-- `AdaptixServer/template/implant/src/core/ApiDefines.h`
-- `AdaptixServer/template/implant/src/core/ConnectorSMB.cpp`
-- `AdaptixServer/template/implant/src/core/ConnectorSMB.h`
-- `AdaptixServer/template/implant/src/core/MainAgent.cpp`
-- `AdaptixServer/template/implant/src/core/Pivotter.cpp`
-- `AdaptixServer/template/implant/src/core/Pivotter.h`
-
-</details>
-
-## Compiler Notes
-
-- `-mno-stack-arg-probe`: avoids `___chkstk_ms` relocation issues in deep obfuscation paths.
-- `-fno-zero-initialized-in-bss`: keeps globals in relocatable sections for PIC usage.
+---
 
 ## Demo
 
 https://github.com/user-attachments/assets/240e1b2d-c8f1-4e70-865d-872f04e192a9
 
+---
+
 ## Credits
 
-- Crystal Palace RDLL approach by Raphael Mudge
-- Ekko research by C5pider
-- Adaptix C2 framework by Adaptix-Framework
-- Kharon Agent inspiration for loader patterns
-- Original Adaptix Crystal Palace template by h41th
+- [h41th](https://github.com/h41th/Simple-Crystal-Palace-RDLL-template-for-Adaptix) — original Crystal Palace loader template for Adaptix
+- [Raphael Mudge](https://www.cobaltstrike.com) — Crystal Palace toolchain
+- [C5pider](https://github.com/Cracked5pider/Ekko) — Ekko sleep obfuscation
+- [Adaptix-Framework](https://github.com/Adaptix-Framework/AdaptixC2) — Adaptix C2 framework
+- [entropy-z](https://github.com/entropy-z/Kharon) — Kharon agent loader inspiration
+
+---
 
 ## Disclaimer
 
-For authorized security testing and red-team operations only. Ensure you have explicit permission before use.
+This project is intended for **authorized red team operations, security research, and educational use only**. Do not deploy against systems you do not own or have explicit written permission to test.
