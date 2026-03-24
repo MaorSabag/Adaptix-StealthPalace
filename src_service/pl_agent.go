@@ -150,6 +150,18 @@ func compileCoff(op, root string, p Params) error {
 			fmt.Sprintf(`-DPICO_STOMP_DLL="%s"`, p.HostDLL),
 			fmt.Sprintf(`-DDLL_STOMP_DLL="%s"`, p.StompDLL),
 		)
+
+		// StompDllTechnique is only relevant if STOMP DLL mode is enabled
+		switch strings.ToLower(p.StompDllTechnique) {
+			case "loadlibraryex":
+				cflags = append(cflags, "-DSTOMP_TECHNIQUE=0")
+				logInfo(op, "STOMP DLL technique: LoadLibraryEx enabled")
+			case "ntcreatesection + ntmapviewofsection":
+				cflags = append(cflags, "-DSTOMP_TECHNIQUE=1")
+				logInfo(op, "STOMP DLL technique: NtCreateSection + NtMapViewOfSection enabled")
+			default:
+				logInfo(op, "STOMP DLL technique: unknown technique %q, defaulting to LoadLibraryEx", p.StompDllTechnique)
+		}
 	}
 
 	if p.Debug {
