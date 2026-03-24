@@ -358,6 +358,8 @@ func stealthPalaceWrapper(event any) error {
 	p.SleepObf          = Settings.SleepObf
 	p.SleepObfTechnique = Settings.SleepObfTechnique
 
+	fmt.Printf("StompDllTechnique: %v\n", p.StompDllTechnique)
+
 	newFileContent := Compile("", builderId, p)
 
 	if newFileContent != nil {

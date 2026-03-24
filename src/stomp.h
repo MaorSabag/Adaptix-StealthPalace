@@ -9,13 +9,14 @@ DECLSPEC_IMPORT void*  __cdecl MSVCRT$memset(void*, int, size_t);
 DECLSPEC_IMPORT NTSYSAPI BOOLEAN WINAPI KERNEL32$RtlAddFunctionTable(PRUNTIME_FUNCTION, DWORD, DWORD64);
 DECLSPEC_IMPORT NTSYSAPI BOOLEAN WINAPI KERNEL32$RtlDeleteFunctionTable(PRUNTIME_FUNCTION);
 
-#if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
-
+/* Shared by both code paths */
 typedef struct _SP_UNICODE_STRING {
     USHORT Length;
     USHORT MaximumLength;
     PWSTR  Buffer;
 } SP_UNICODE_STRING;
+
+#if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
 
 typedef struct _SP_OBJECT_ATTRIBUTES {
     ULONG              Length;
@@ -51,6 +52,9 @@ DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtUnmapViewOfSection(HANDLE, PVOID);
 DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtClose(HANDLE);
 
 DECLSPEC_IMPORT LPVOID WINAPI KERNEL32$VirtualAlloc(LPVOID, SIZE_T, DWORD, DWORD);
+
+#endif /* STOMP_TECHNIQUE == 1 */
+
 
 typedef struct _SP_LIST_ENTRY {
     struct _SP_LIST_ENTRY* Flink;
@@ -131,8 +135,6 @@ typedef struct _SP_PEB {
     SP_FAKE_LDR_FULL_WCHARS * sizeof(WCHAR) + \
     SP_FAKE_LDR_BASE_WCHARS * sizeof(WCHAR) \
 ))
-
-#endif
 
 typedef struct _PICO {
     char data[4096];
