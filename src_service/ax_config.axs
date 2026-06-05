@@ -86,6 +86,10 @@ function settingsValidate(settings) {
     return true;
 }
 
+function endsWith(str, suffix) {
+    return str.indexOf(suffix, str.length - suffix.length) !== -1;
+}
+
 function buildCompileWindow() {
     ax.log("Opening Compile Agent window...");
     
@@ -139,7 +143,7 @@ function buildCompileWindow() {
     let textlineHostDll = form.create_textline();
     let textlineStompDll = form.create_textline();
     let comboStompTechnique = form.create_combo();
-    let stompTechItems = ["LoadLibraryEx", "NtCreateSection + NtMapViewOfSection"];
+    let stompTechItems = ["LoadLibraryEx", "NtCreateSection + NtMapViewOfSection", "Phantom"];
     comboStompTechnique.addItems(stompTechItems);
     comboStompTechnique.setCurrentIndex(0);
     let grid_stomp = form.create_gridlayout();
@@ -156,7 +160,7 @@ function buildCompileWindow() {
 
     // Group 5: Sleep Obfuscation
     let comboSleepObf = form.create_combo();
-    let sleepObfItems = ["Ekko"];
+    let sleepObfItems = ["Ekko", "Kraken Mask"];
     comboSleepObf.addItems(sleepObfItems);
     let grid_sleep = form.create_gridlayout();
     grid_sleep.addWidget(form.create_label("Technique:"), 0, 0, 1, 1);
@@ -166,7 +170,18 @@ function buildCompileWindow() {
     let grp_sleep = form.create_groupbox("Sleep Obfuscation (optional)", true);
     grp_sleep.setPanel(panel_sleep);
 
-    // Group 6: Output
+    // Group 6: Checkbox and textline for XOR Encryption (optional)
+    let textlineXorKey = form.create_textline();
+    textlineXorKey.setPlaceholder("XOR Key (required if enabled)");
+    let grid_xor = form.create_gridlayout();
+    grid_xor.addWidget(form.create_label("XOR Key:"), 1, 0, 1, 1);
+    grid_xor.addWidget(textlineXorKey, 1, 1, 1, 1);
+    let panel_xor = form.create_panel();
+    panel_xor.setLayout(grid_xor);
+    let grp_xor = form.create_groupbox("XOR Encryption (optional)", true);
+    grp_xor.setPanel(panel_xor);
+
+    // Group 7: Output
     let txt_output = form.create_textmulti();
     txt_output.setReadOnly(true);
     g_output_widget = txt_output;
@@ -209,6 +224,15 @@ function buildCompileWindow() {
         panel_sleep.setEnabled(false);
     }
 
+    if (g_settings.xor) {
+        grp_xor.setChecked(true);
+        panel_xor.setEnabled(true);
+        textlineXorKey.setText(g_settings.xor_key || "");
+    } else {
+        grp_xor.setChecked(false);
+        panel_xor.setEnabled(false);
+    }
+
     let btn_save = form.create_button("Save Settings");
     let btn_compile = form.create_button("▶ Compile");
 
@@ -218,6 +242,10 @@ function buildCompileWindow() {
 
     form.connect(grp_sleep, "clicked", function (checked) {
         panel_sleep.setEnabled(checked);
+    });
+
+    form.connect(grp_xor, "clicked", function (checked) {
+        panel_xor.setEnabled(checked);
     });
 
     form.connect(comboFormat, "currentTextChanged", function (text) {
@@ -231,15 +259,26 @@ function buildCompileWindow() {
             return;
         }
         if (grp_stomp.isChecked()) {
-            if (textlineHostDll.text().trim() === "") {
-                ax.show_message("Validation Error", "Host DLL path is required when Stomp is enabled.");
+            if (textlineHostDll.text().trim() === "" || !endsWith(textlineHostDll.text().trim().toLowerCase(), ".dll")) {
+                ax.show_message("Validation Error", "A Valid Host DLL path is required when Stomp is enabled.");
                 return;
             }
-            if (textlineStompDll.text().trim() === "") {
-                ax.show_message("Validation Error", "Stomp DLL path is required when Stomp is enabled.");
+            if (textlineStompDll.text().trim() === "" || !endsWith(textlineStompDll.text().trim().toLowerCase(), ".dll")) {
+                ax.show_message("Validation Error", "A Valid Stomp DLL path is required when Stomp is enabled.");
                 return;
             }
         }
+
+        // if XOR is enabled, ensure key is provided and support only Shellcode format
+        if (grp_xor.isChecked() && comboFormat.currentText().toLowerCase() !== "bin") {
+            ax.show_message("Validation Error", "XOR Encryption is only supported for Bin format. Please change the format to Bin or disable XOR.");
+            return;
+        }
+        if (grp_xor.isChecked() && textlineXorKey.text().trim() === "") {
+            ax.show_message("Validation Error", "XOR Key cannot be empty when XOR Encryption is enabled.");
+            return;
+        }
+
         // Update the global variable immediately so it stays in sync
         g_settings = {
             format: comboFormat.currentText(),
@@ -253,7 +292,9 @@ function buildCompileWindow() {
             stomp_dll: grp_stomp.isChecked() ? textlineStompDll.text() : "",
             stomp_dll_technique: grp_stomp.isChecked() ? comboStompTechnique.currentText().toLowerCase() : "loadlibraryex",
             sleep_obf: grp_sleep.isChecked(),
-            sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko"
+            sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko",
+            xor: grp_xor.isChecked(),
+            xor_key: grp_xor.isChecked() ? textlineXorKey.text() : ""
         };
         // Send to service for persistent storage
         ax.service_command("stealthpalace", "save_settings", g_settings);
@@ -274,14 +315,24 @@ function buildCompileWindow() {
             return;
         }
         if (grp_stomp.isChecked()) {
-            if (textlineHostDll.text().trim() === "") {
-                ax.show_message("Validation Error", "Host DLL path is required when Stomp is enabled.");
+            if (textlineHostDll.text().trim() === "" || !endsWith(textlineHostDll.text().trim().toLowerCase(), ".dll")) {
+                ax.show_message("Validation Error", "A Valid Host DLL path is required when Stomp is enabled.");
                 return;
             }
-            if (textlineStompDll.text().trim() === "") {
-                ax.show_message("Validation Error", "Stomp DLL path is required when Stomp is enabled.");
+            if (textlineStompDll.text().trim() === "" || !endsWith(textlineStompDll.text().trim().toLowerCase(), ".dll")) {
+                ax.show_message("Validation Error", "A Valid Stomp DLL path is required when Stomp is enabled.");
                 return;
             }
+        }
+
+        // if XOR is enabled, ensure key is provided and support only Shellcode format
+        if (grp_xor.isChecked() && comboFormat.currentText().toLowerCase() !== "bin") {
+            ax.show_message("Validation Error", "XOR Encryption is only supported for Bin format. Please change the format to Bin or disable XOR.");
+            return;
+        }
+        if (grp_xor.isChecked() && textlineXorKey.text().trim() === "") {
+            ax.show_message("Validation Error", "XOR Key cannot be empty when XOR Encryption is enabled.");
+            return;
         }
 
         ax.service_command("stealthpalace", "run_compile", {
@@ -296,7 +347,9 @@ function buildCompileWindow() {
             stomp_dll: grp_stomp.isChecked() ? textlineStompDll.text() : "",
             stomp_dll_technique: grp_stomp.isChecked() ? comboStompTechnique.currentText().toLowerCase() : "loadlibraryex",
             sleep_obf: grp_sleep.isChecked(),
-            sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko"
+            sleep_obf_technique: grp_sleep.isChecked() ? comboSleepObf.currentText().toLowerCase() : "ekko",
+            xor: grp_xor.isChecked(),
+            xor_key: grp_xor.isChecked() ? textlineXorKey.text() : ""
         });
     });
 
@@ -306,6 +359,7 @@ function buildCompileWindow() {
     main_layout.addWidget(grp_flags);
     main_layout.addWidget(grp_stomp);
     main_layout.addWidget(grp_sleep);
+    main_layout.addWidget(grp_xor);
     main_layout.addWidget(btn_save);
     main_layout.addWidget(btn_compile);
     main_layout.addWidget(grp_output);

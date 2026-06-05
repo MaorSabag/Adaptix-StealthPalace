@@ -1,8 +1,58 @@
 #pragma once
 #include <windows.h>
 #include "tcg.h"
+#include "cfg.h"
 
 #define NtCurrentProcess()  ((HANDLE)(LONG_PTR)-1)
+
+DECLSPEC_IMPORT void * __cdecl MSVCRT$memset ( void *, int, size_t );
+DECLSPEC_IMPORT void * __cdecl MSVCRT$memcpy ( void *, const void *, size_t );
+//getchar
+DECLSPEC_IMPORT int __cdecl MSVCRT$getchar(void);
+// Sleep
+DECLSPEC_IMPORT void WINAPI KERNEL32$Sleep(DWORD);
+
+
+char _DLL_ [0] __attribute__ ( ( section ( "dll" ) ) );
+char _PICO_ [ 0 ] __attribute__ ( ( section ( "pico" ) ) );
+char _MASK_  [0] __attribute__ ( ( section ( "mask"  ) ) );
+
+typedef struct {
+    int  len;
+    char value[];
+} RESOURCE;
+
+typedef struct {
+	char * picData;
+	DWORD  picSize;
+} PIC_CLEANUP_CTX;
+
+int __tag_setup_hooks ( );
+int __tag_set_image_info ( );
+
+typedef void ( * SETUP_HOOKS ) ( IMPORTFUNCS * funcs );
+typedef void ( * SET_IMAGE_INFO ) ( PVOID base, DWORD size );
+
+
+#define GETRESOURCE(x) ( char * ) &x
+
+#ifdef STOMP_DLL
+
+    #ifndef PICO_STOMP_DLL
+        #error "PICO_STOMP_DLL must be defined when compiling StompDLL"
+    #endif
+
+    #ifndef DLL_STOMP_DLL
+        #error "DLL_STOMP_DLL must be defined when compiling StompDLL"
+    #endif
+
+    #define MODE_STOMP 1
+
+#else
+    #define MODE_STOMP 0
+#endif
+
+
 DECLSPEC_IMPORT LPVOID WINAPI KERNEL32$VirtualAlloc ( LPVOID, SIZE_T, DWORD, DWORD );
 DECLSPEC_IMPORT BOOL WINAPI KERNEL32$VirtualProtect ( LPVOID, SIZE_T, DWORD, PDWORD );
 DECLSPEC_IMPORT BOOL WINAPI KERNEL32$VirtualFree ( LPVOID, SIZE_T, DWORD );
@@ -27,78 +77,6 @@ DECLSPEC_IMPORT RUNTIME_FUNCTION * WINAPI KERNEL32$RtlLookupFunctionEntry ( DWOR
 DECLSPEC_IMPORT HMODULE WINAPI KERNEL32$GetModuleHandleA(LPCSTR);
 DECLSPEC_IMPORT NTSYSAPI VOID NTAPI NTDLL$RtlCaptureContext(PCONTEXT);
 DECLSPEC_IMPORT NTSTATUS NTAPI NTDLL$NtContinue(PCONTEXT, BOOLEAN);
+// GetProcAddress and GetModuleHandleA are used in the hooks to resolve the addresses of the original functions, so they must be imported here as well
+DECLSPEC_IMPORT FARPROC WINAPI KERNEL32$GetProcAddress(HMODULE, LPCSTR);
 
-
-// Printf from msvcrt.dll
-DECLSPEC_IMPORT void * __cdecl MSVCRT$memset ( void *, int, size_t );
-DECLSPEC_IMPORT void * __cdecl MSVCRT$memcpy ( void *, const void *, size_t );
-
-
-char _DLL_ [0] __attribute__ ( ( section ( "dll" ) ) );
-char _PICO_ [ 0 ] __attribute__ ( ( section ( "pico" ) ) );
-char _MASK_  [0] __attribute__ ( ( section ( "mask"  ) ) );
-
-typedef struct {
-    int  len;
-    char value[];
-} RESOURCE;
-
-typedef struct {
-	char * picData;
-	DWORD  picSize;
-} PIC_CLEANUP_CTX;
-
-int __tag_setup_hooks ( );
-int __tag_set_image_info ( );
-
-typedef void ( * SETUP_HOOKS ) ( IMPORTFUNCS * funcs );
-typedef void ( * SET_IMAGE_INFO ) ( PVOID base, DWORD size );
-
-#define GETRESOURCE(x) ( char * ) &x
-
-#ifdef STOMP_DLL
-
-    #ifndef PICO_STOMP_DLL
-        #error "PICO_STOMP_DLL must be defined when compiling StompDLL"
-    #endif
-
-    #ifndef DLL_STOMP_DLL
-        #error "DLL_STOMP_DLL must be defined when compiling StompDLL"
-    #endif
-
-    #define MODE_STOMP 1
-
-#else
-    #define MODE_STOMP 0
-#endif
-
-void* GetExport(char* base, const char* name) {
-    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
-    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
-    
-    // Safety check for empty export table
-    if (nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size == 0) return NULL;
-
-    PIMAGE_EXPORT_DIRECTORY exports = (PIMAGE_EXPORT_DIRECTORY)(base + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-    
-    DWORD* names = (DWORD*)(base + exports->AddressOfNames);
-    DWORD* functions = (DWORD*)(base + exports->AddressOfFunctions);
-    WORD* ordinals = (WORD*)(base + exports->AddressOfNameOrdinals);
-
-    for (DWORD i = 0; i < exports->NumberOfNames; i++) {
-        char* funcName = (char*)(base + names[i]);
-        
-        // Manual string comparison loop (Relocation-safe)
-        const char* s1 = funcName;
-        const char* s2 = name;
-        while (*s1 && (*s1 == *s2)) {
-            s1++;
-            s2++;
-        }
-
-        if (*(unsigned char*)s1 == *(unsigned char*)s2) {
-            return (void*)(base + functions[ordinals[i]]);
-        }
-    }
-    return NULL;
-}

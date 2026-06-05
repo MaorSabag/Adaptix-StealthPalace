@@ -43,3 +43,23 @@ All notable changes to this project will be documented in this file.
 - `Settings` global in `pl_main.go` is now initialized via `defaultSaveSettings()` to guarantee sane defaults even before a config file is loaded.
 - Stomp mode allocates a dedicated `RUNTIME_FUNCTION` buffer for pico module entries, passed through `PICO_ARGS`.
 - Ekko-specific function resolution (`NtContinue`, `RtlCaptureContext`, `SystemFunction032`) is only performed at startup when `SLEEP_OBF_EKKO` is defined, avoiding unnecessary `LoadLibrary` calls otherwise.
+
+## [1.3.0] - 2026-05-13
+### Added
+- **Control Flow Guard (CFG) gadget registration**: New `src/cfg.c` + `src/cfg.h` introduces `_cfg_mark_region`, `_cfg_mark_single`, `_cfg_mark_single_image`, `EnableCFG`, `EnableCFGForPICO`, and primitives built on top of `NtSetInformationVirtualMemory(VmCfgCallTargetInformation)`. Sleep-obfuscation ROP gadgets (Ekko and Kraken Mask) are now registered as valid CFG call targets so the loader survives on CFG-enabled hosts. Agent executable sections are re-marked after each VirtualProtect cycle inside the sleep hook.
+- **Ekko refactored into standalone `src/ekko.c`** with an expanded 14-frame ROP chain (gate, VP_RW, encrypt, GetCtx, CopyRip, CopyTib, SetCtx, sleep, RestoreTib, SetCtxRestore, decrypt, restorePerms, setEvent) and thread-context / TIB swap so stack walkers see a spoof thread's stack range during sleep.
+- **Kraken Mask sleep-obfuscation technique** (`src/kraken_mask.c`, selectable in the UI alongside Ekko). 16-context ROP, spoofed RSP sourced from a helper thread, full TIB swap, and RC4 image masking via `SystemFunction032`. Compiled with `-DSLEEP_OBF_KRAKEN_MASK`.
+- **Phantom DLL Hollowing (NTFS transaction)** stomp technique. Selectable in the UI as a third option alongside `LoadLibraryEx` and `NtCreateSection + NtMapViewOfSection`. Compiled with `-DSTOMP_TECHNIQUE=2`.
+- **XOR Encryption (optional)** UI group in the compile window. Wraps the final shellcode output with operator-supplied key XOR. Restricted to `Bin` format; validation enforces non-empty key. Adds `Xor` / `XorKey` to `Settings` and `Params`; new `applyXorEncryption()` post-build pass in `pl_agent.go`.
+- **`WinMainCRTStartup` entry point** added to `loader/source/main/Exe.cc` so the linked EXE artifact runs without depending on the C runtime startup; `WinMain` now blocks via `WaitForSingleObject(INFINITE)` after `Runner()`.
+- `#pragma once` guard added to `loader/include/Adaptix.h`.
+
+### Changed
+- **Build hardening**: Added `-falign-functions=1 -falign-jumps=1 -falign-loops=1` to both `Makefile` CFLAGS and `pl_agent.go` compile flags. Also adds `-Wno-multichar -Wno-unused-function -Wno-unused-variable -Wno-address` to suppress benign warnings during the COFF build.
+- **GUI input validation**: Host DLL / Stomp DLL path fields now require a `.dll` suffix (case-insensitive) in addition to the existing non-empty check. New `endsWith(str, suffix)` helper added to `ax_config.axs`; error message clarified to "A Valid Host/Stomp DLL path is required when Stomp is enabled."
+- **Crystal Palace specs**:
+  - `loader.spec` and `pico.spec` now `load "../../build/cfg.x64.o"` and merge it.
+  - `loader.spec` and `pico.spec` add `ised insert "CALL r/m64" $NOP +safe` to break the `defense_evasion_suspicious_call_stack_trailing_bytes` pattern by ensuring bytes after every indirect CALL site begin with `0x90`, not `0x4883`.
+- **Crystal Palace toolchain binaries** (`coffparse`, `disassemble`, `link`, `piclink`) refreshed.
+- `Makefile`: `cfg.x64.o` added to the `all:` target and build recipe.
+- `pl_agent.go`: `cfg.c` added to the COFF compile list; new `case "phantom"` (stomp) and `case "kraken mask"` (sleep) dispatch arms.
