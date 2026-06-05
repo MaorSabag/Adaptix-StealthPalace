@@ -91,6 +91,8 @@ type Params struct {
 	StompDllTechnique string `json:"stomp_dll_technique"`
 	SleepObf          bool   `json:"sleep_obf"`
 	SleepObfTechnique string `json:"sleep_obf_technique"`
+	Xor               bool   `json:"xor"`
+	XorKey            string `json:"xor_key"`
 }
 
 type SaveSettings struct {
@@ -106,6 +108,8 @@ type SaveSettings struct {
 	StompDllTechnique string `json:"stomp_dll_technique"`
 	SleepObf          bool   `json:"sleep_obf"`
 	SleepObfTechnique string `json:"sleep_obf_technique"`
+	Xor               bool   `json:"xor"`
+	XorKey            string `json:"xor_key"`
 }
 
 
@@ -357,6 +361,8 @@ func stealthPalaceWrapper(event any) error {
 	p.StompDllTechnique = Settings.StompDllTechnique
 	p.SleepObf          = Settings.SleepObf
 	p.SleepObfTechnique = Settings.SleepObfTechnique
+	p.Xor               = Settings.Xor
+	p.XorKey            = Settings.XorKey
 
 	fmt.Printf("StompDllTechnique: %v\n", p.StompDllTechnique)
 
@@ -400,5 +406,7 @@ func defaultSaveSettings() SaveSettings {
 		SleepObf:          false,
 		SleepObfTechnique: "ekko",
 		StompDllTechnique: "loadlibraryex",
+		Xor:               false,
+		XorKey:            "",
 	}
 }
